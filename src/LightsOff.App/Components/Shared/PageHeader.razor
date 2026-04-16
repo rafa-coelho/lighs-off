@@ -1,0 +1,25 @@
+@* Standard page header: eyebrow + title + right-hand action slot. *@
+<div class="flex items-end justify-between gap-4 mb-6">
+    <div class="min-w-0">
+        @if (!string.IsNullOrEmpty(Eyebrow))
+        {
+            <div class="text-xs uppercase tracking-wider text-zinc-500 mb-1">@Eyebrow</div>
+        }
+        <h1 class="text-2xl font-semibold tracking-tight truncate">@Title</h1>
+        @if (!string.IsNullOrEmpty(Description))
+        {
+            <p class="text-sm text-zinc-400 mt-1">@Description</p>
+        }
+    </div>
+    @if (Actions is not null)
+    {
+        <div class="flex items-center gap-2 flex-shrink-0">@Actions</div>
+    }
+</div>
+
+@code {
+    [Parameter] public string? Eyebrow { get; set; }
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+    [Parameter] public string? Description { get; set; }
+    [Parameter] public RenderFragment? Actions { get; set; }
+}

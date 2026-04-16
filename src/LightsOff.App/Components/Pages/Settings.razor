@@ -1,0 +1,327 @@
+@page "/settings"
+@inject IJiraConnectionProvider JiraProvider
+@inject IJiraClient Jira
+@inject IGitHubClient GitHub
+@inject ISecretStore Secrets
+@inject IAppSettingsStore AppSettings
+@inject ToastService Toasts
+
+<PageTitle>Settings</PageTitle>
+
+<div class="mb-8">
+    <h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
+    <p class="text-sm text-zinc-400 mt-1">Credentials are stored locally in <code class="text-zinc-300">~/.lightsoff/secrets.json</code> with 0600 permissions.</p>
+</div>
+
+<div class="grid lg:grid-cols-2 gap-5">
+    <!-- Jira card -->
+    <section class="rounded-xl border border-zinc-800/80 bg-zinc-900/40 overflow-hidden">
+        <header class="px-6 py-4 border-b border-zinc-800/80 flex items-center justify-between">
+            <div>
+                <h2 class="font-semibold">Jira</h2>
+                <p class="text-xs text-zinc-500 mt-0.5">Atlassian Cloud / REST v3</p>
+            </div>
+            @if (_hasExistingToken)
+            {
+                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+                    <Icon Name="check" Class="w-3 h-3" />
+                    Connected
+                </span>
+            }
+        </header>
+        <div class="p-6 space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Base URL</label>
+                <input @bind="_baseUrl" type="url" placeholder="https://yourco.atlassian.net"
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Email</label>
+                <input @bind="_email" type="email" placeholder="you@example.com"
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">API token</label>
+                <input @bind="_apiToken" type="password" placeholder="@(_hasExistingToken ? "•••••••••• (stored)" : "paste token")"
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono" />
+                <p class="text-xs text-zinc-500 mt-1.5">
+                    @(_hasExistingToken ? "Leave blank to keep existing token. " : "")
+                    Create at <a href="https://id.atlassian.com/manage-profile/security/api-tokens" target="_blank" rel="noopener" class="text-emerald-400 hover:text-emerald-300 underline underline-offset-2">id.atlassian.com</a>.
+                </p>
+            </div>
+            <div class="pt-2">
+                <button type="button" @onclick="SaveJiraAsync" disabled="@_savingJira"
+                        class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                    @if (_savingJira)
+                    {
+                        <Spinner />
+                        <span>Testing…</span>
+                    }
+                    else
+                    {
+                        <Icon Name="check" Class="w-4 h-4" />
+                        <span>Test &amp; save</span>
+                    }
+                </button>
+            </div>
+        </div>
+    </section>
+
+    <!-- GitHub card -->
+    <section class="rounded-xl border border-zinc-800/80 bg-zinc-900/40 overflow-hidden">
+        <header class="px-6 py-4 border-b border-zinc-800/80 flex items-center justify-between">
+            <div>
+                <h2 class="font-semibold">GitHub</h2>
+                <p class="text-xs text-zinc-500 mt-0.5">Personal access token for clone / push</p>
+            </div>
+            @if (_hasGithubPat)
+            {
+                <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">
+                    <Icon Name="check" Class="w-3 h-3" />
+                    Configured
+                </span>
+            }
+        </header>
+        <div class="p-6 space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Personal access token</label>
+                <input @bind="_githubPat" type="password" placeholder="@(_hasGithubPat ? "•••••••••• (stored)" : "ghp_...")"
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono" />
+                <p class="text-xs text-zinc-500 mt-1.5">
+                    Fine-grained PAT with Metadata + Contents (read), or classic PAT with <code class="text-zinc-300">repo</code> scope. Create at
+                    <a href="https://github.com/settings/tokens" target="_blank" rel="noopener" class="text-emerald-400 hover:text-emerald-300 underline underline-offset-2">github.com/settings/tokens</a>.
+                </p>
+            </div>
+
+            <div>
+                <div class="flex items-center justify-between mb-1.5">
+                    <label class="block text-xs font-medium text-zinc-400">
+                        Organizations to browse <span class="text-zinc-600">(optional)</span>
+                    </label>
+                    <button type="button" @onclick="LoadOrgsAsync" disabled="@(_loadingOrgs || !_hasGithubPat)"
+                            class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1 disabled:opacity-40">
+                        @if (_loadingOrgs) { <Spinner Class="w-3 h-3" /> }
+                        else { <Icon Name="refresh" Class="w-3 h-3" /> }
+                        <span>@(_loadingOrgs ? "Loading" : "Refresh")</span>
+                    </button>
+                </div>
+
+                @if (!_hasGithubPat)
+                {
+                    <div class="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2.5 text-xs text-zinc-500">
+                        Save a PAT first to load your organizations.
+                    </div>
+                }
+                else if (_orgsError is not null)
+                {
+                    <div class="rounded-md border border-red-900/70 bg-red-950/30 px-3 py-2.5 text-xs text-red-300">@_orgsError</div>
+                }
+                else if (_availableOrgs is null)
+                {
+                    <div class="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2.5 text-xs text-zinc-500 flex items-center gap-2">
+                        <Spinner Class="w-3 h-3" /> Fetching your organizations…
+                    </div>
+                }
+                else if (_availableOrgs.Count == 0)
+                {
+                    <div class="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2.5 text-xs text-zinc-500">
+                        Your token has no accessible private repos to derive orgs from.
+                        Add a repo in the token's scope, or leave this empty — Browse will still use the private-repo search.
+                    </div>
+                }
+                else
+                {
+                    <div class="rounded-md border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800/80 max-h-48 overflow-y-auto">
+                        @foreach (var org in _availableOrgs)
+                        {
+                            var checked_ = _selectedOrgs.Contains(org, StringComparer.OrdinalIgnoreCase);
+                            <label class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-zinc-900/60 transition-colors" @key="org">
+                                <input type="checkbox" checked="@checked_"
+                                       @onchange="@(e => ToggleOrg(org, (bool)e.Value!))"
+                                       class="w-4 h-4 rounded border-zinc-700 bg-zinc-950 text-emerald-500 focus:ring-2 focus:ring-emerald-500/40 focus:ring-offset-0" />
+                                <span class="text-sm font-medium text-zinc-200">@org</span>
+                            </label>
+                        }
+                    </div>
+                }
+
+                <p class="text-xs text-zinc-500 mt-1.5">
+                    Checked orgs → Browse calls <code>/orgs/{'{'}org{'}'}/repos</code> for each (includes private and public, token-scoped).
+                    None checked → Browse falls back to <code>search is:private</code> (private repos only, zero config).
+                </p>
+            </div>
+
+            <div class="flex gap-2 pt-2">
+                <button type="button" @onclick="SaveGithubAsync" disabled="@_savingGithub"
+                        class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                    @if (_savingGithub) { <Spinner /> <span>Saving…</span> }
+                    else { <Icon Name="check" Class="w-4 h-4" /> <span>Save</span> }
+                </button>
+                @if (_hasGithubPat)
+                {
+                    <button type="button" @onclick="RemoveGithubPatAsync"
+                            class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-red-900/70 hover:bg-red-950/40 text-red-300 text-sm font-medium transition-colors">
+                        <Icon Name="trash" Class="w-4 h-4" />
+                        <span>Remove token</span>
+                    </button>
+                }
+            </div>
+        </div>
+    </section>
+</div>
+
+@code {
+    private string _baseUrl = string.Empty;
+    private string _email = string.Empty;
+    private string _apiToken = string.Empty;
+    private bool _hasExistingToken;
+    private bool _savingJira;
+
+    private string _githubPat = string.Empty;
+    private bool _hasGithubPat;
+    private bool _savingGithub;
+
+    private IReadOnlyList<string>? _availableOrgs;
+    private readonly HashSet<string> _selectedOrgs = new(StringComparer.OrdinalIgnoreCase);
+    private bool _loadingOrgs;
+    private string? _orgsError;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var connection = await JiraProvider.GetAsync();
+        if (connection is not null)
+        {
+            _baseUrl = connection.BaseUrl;
+            _email = connection.Email;
+            var existing = await Secrets.GetAsync(connection.ApiTokenSecretKey);
+            _hasExistingToken = !string.IsNullOrEmpty(existing);
+        }
+        _hasGithubPat = !string.IsNullOrEmpty(await Secrets.GetAsync(SecretKeys.GitHubPat));
+
+        var stored = await AppSettings.GetAsync(AppSettingsKeys.GitHubOrgs) ?? string.Empty;
+        foreach (var o in stored.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            _selectedOrgs.Add(o);
+        }
+
+        if (_hasGithubPat)
+        {
+            _ = LoadOrgsAsync();
+        }
+    }
+
+    private async Task LoadOrgsAsync()
+    {
+        _loadingOrgs = true;
+        _orgsError = null;
+        _availableOrgs = null;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _availableOrgs = await GitHub.ListUserOrgsAsync();
+        }
+        catch (Exception ex)
+        {
+            _orgsError = ex.Message;
+        }
+        finally
+        {
+            _loadingOrgs = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ToggleOrg(string org, bool selected)
+    {
+        if (selected) _selectedOrgs.Add(org);
+        else _selectedOrgs.Remove(org);
+    }
+
+    private async Task SaveJiraAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_baseUrl) || string.IsNullOrWhiteSpace(_email))
+        {
+            Toasts.Warning("Base URL and email are required.");
+            return;
+        }
+
+        _savingJira = true;
+        try
+        {
+            var tokenToTest = !string.IsNullOrWhiteSpace(_apiToken)
+                ? _apiToken
+                : await Secrets.GetAsync(SecretKeys.JiraApiToken) ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(tokenToTest))
+            {
+                Toasts.Warning("API token is required.");
+                return;
+            }
+
+            var connection = new JiraConnection
+            {
+                BaseUrl = _baseUrl,
+                Email = _email,
+                ApiTokenSecretKey = SecretKeys.JiraApiToken
+            };
+
+            if (!await Jira.TestConnectionAsync(connection, tokenToTest))
+            {
+                Toasts.Error("Authentication failed. Check URL, email, and token.");
+                return;
+            }
+
+            await JiraProvider.SaveAsync(connection, tokenToTest);
+            _apiToken = string.Empty;
+            _hasExistingToken = true;
+            Toasts.Success("Jira connection saved.");
+        }
+        finally
+        {
+            _savingJira = false;
+        }
+    }
+
+    private async Task SaveGithubAsync()
+    {
+        _savingGithub = true;
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(_githubPat))
+            {
+                await Secrets.SetAsync(SecretKeys.GitHubPat, _githubPat);
+                _githubPat = string.Empty;
+                _hasGithubPat = true;
+                _ = LoadOrgsAsync(); // refresh org list with the newly-saved PAT
+            }
+
+            var orgs = _selectedOrgs.Count > 0
+                ? string.Join(", ", _selectedOrgs.OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
+                : null;
+            await AppSettings.SetAsync(AppSettingsKeys.GitHubOrgs, orgs);
+
+            if (!_hasGithubPat)
+            {
+                Toasts.Warning("Paste a PAT to complete the setup.");
+                return;
+            }
+
+            Toasts.Success(orgs is null
+                ? "GitHub PAT saved. Browse will use private-repo search."
+                : $"Saved. Browse will list: {orgs}.");
+        }
+        finally
+        {
+            _savingGithub = false;
+        }
+    }
+
+    private async Task RemoveGithubPatAsync()
+    {
+        await Secrets.RemoveAsync(SecretKeys.GitHubPat);
+        _hasGithubPat = false;
+        _availableOrgs = null;
+        _selectedOrgs.Clear();
+        Toasts.Info("GitHub PAT removed.");
+    }
+}

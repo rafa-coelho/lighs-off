@@ -1,0 +1,19 @@
+@{
+    var (bg, border, text, icon) = Kind switch
+    {
+        AlertKind.Success => ("bg-emerald-950/30", "border-emerald-900/70", "text-emerald-200", "check"),
+        AlertKind.Warning => ("bg-amber-950/30",   "border-amber-900/70",   "text-amber-200",   "alert"),
+        AlertKind.Error   => ("bg-red-950/30",     "border-red-900/70",     "text-red-200",     "alert"),
+        _                 => ("bg-sky-950/30",     "border-sky-900/70",     "text-sky-200",     "info"),
+    };
+}
+<div class="rounded-lg border @border @bg @text px-4 py-3 text-sm flex items-start gap-3">
+    <div class="flex-shrink-0 mt-0.5"><Icon Name="@icon" Class="w-4 h-4" /></div>
+    <div class="flex-1 leading-relaxed">@ChildContent</div>
+</div>
+
+@code {
+    public enum AlertKind { Info, Success, Warning, Error }
+    [Parameter] public AlertKind Kind { get; set; } = AlertKind.Info;
+    [Parameter, EditorRequired] public RenderFragment ChildContent { get; set; } = default!;
+}

@@ -1,0 +1,194 @@
+@page "/tickets"
+@inject IJiraClient Jira
+@inject IJiraConnectionProvider JiraProvider
+@inject NavigationManager Nav
+
+<PageTitle>Tickets</PageTitle>
+
+<PageHeader Title="Tickets" Description="Issues from the active board. Click a row to open the ticket.">
+    <Actions>
+        @if (_boardId.HasValue)
+        {
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-zinc-900 border border-zinc-800 text-zinc-300">
+                Board @_boardId
+            </span>
+        }
+        <button type="button" @onclick="LoadAsync" disabled="@_loading"
+                class="inline-flex items-center gap-2 h-9 px-3 rounded-md text-sm text-zinc-300 hover:text-zinc-50 hover:bg-zinc-800/50 transition-colors disabled:opacity-50">
+            @if (_loading) { <Spinner /> } else { <Icon Name="refresh" Class="w-4 h-4" /> }
+            <span>Refresh</span>
+        </button>
+    </Actions>
+</PageHeader>
+
+@if (_state == LoadState.NotConfigured)
+{
+    <Alert Kind="Alert.AlertKind.Warning">
+        Jira is not configured. <a href="/settings" class="text-amber-100 underline underline-offset-2">Open settings</a>.
+    </Alert>
+}
+else if (_state == LoadState.NoBoard)
+{
+    <Alert Kind="Alert.AlertKind.Info">
+        No active board selected. <a href="/boards" class="text-sky-100 underline underline-offset-2">Pick a board</a>.
+    </Alert>
+}
+else if (_state == LoadState.Error)
+{
+    <Alert Kind="Alert.AlertKind.Error">@_error</Alert>
+}
+else
+{
+    <!-- Filter bar -->
+    <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/30 p-4 mb-4">
+        <div class="flex flex-col md:flex-row gap-3 items-stretch md:items-end">
+            <div class="flex-1 min-w-0">
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">JQL filter</label>
+                <div class="relative">
+                    <div class="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600">
+                        <Icon Name="search" Class="w-4 h-4" />
+                    </div>
+                    <input @bind="_jqlInput" @bind:event="oninput" @onkeydown="OnJqlKeyDown"
+                           placeholder='e.g. status = "In Progress" AND assignee = currentUser()'
+                           class="w-full bg-zinc-950 border border-zinc-800 rounded-md pl-9 pr-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono text-xs" />
+                </div>
+            </div>
+            <div class="md:w-44">
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Status</label>
+                <select @bind="_statusFilter"
+                        class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors">
+                    <option value="">All</option>
+                    @foreach (var status in _availableStatuses)
+                    {
+                        <option value="@status">@status</option>
+                    }
+                </select>
+            </div>
+            <button type="button" @onclick="LoadAsync" disabled="@_loading"
+                    class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50">
+                @if (_loading) { <Spinner /> <span>Searching…</span> } else { <Icon Name="search" Class="w-4 h-4" /> <span>Apply</span> }
+            </button>
+        </div>
+    </div>
+
+    @if (_loading && _tickets is null)
+    {
+        <div class="flex items-center gap-3 text-sm text-zinc-500 py-12 justify-center"><Spinner /> Loading tickets…</div>
+    }
+    else if (_filtered.Count == 0)
+    {
+        <EmptyState IconName="ticket" Title="No tickets match" Description="Try adjusting the JQL or status filter above." />
+    }
+    else
+    {
+        <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/30 overflow-hidden">
+            <table class="w-full text-sm">
+                <thead class="text-xs uppercase tracking-wider text-zinc-500 bg-zinc-950/50">
+                    <tr>
+                        <th class="text-left font-medium py-3 px-4 w-28">Key</th>
+                        <th class="text-left font-medium py-3 px-4">Summary</th>
+                        <th class="text-left font-medium py-3 px-4 w-36">Status</th>
+                        <th class="text-left font-medium py-3 px-4 w-24">Type</th>
+                        <th class="text-left font-medium py-3 px-4 w-44">Assignee</th>
+                    </tr>
+                </thead>
+                <tbody class="divide-y divide-zinc-800/60">
+                    @foreach (var t in _filtered)
+                    {
+                        <tr class="hover:bg-zinc-900/60 cursor-pointer transition-colors group" @onclick="() => OpenTicket(t)">
+                            <td class="py-3 px-4"><code class="text-emerald-400 font-medium">@t.Key</code></td>
+                            <td class="py-3 px-4 text-zinc-200 group-hover:text-zinc-50">@t.Summary</td>
+                            <td class="py-3 px-4">
+                                <span class="@StatusBadgeClasses(t.Status)">@t.Status</span>
+                            </td>
+                            <td class="py-3 px-4 text-zinc-400">@t.Type</td>
+                            <td class="py-3 px-4 text-zinc-400">@(t.Assignee ?? "—")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+        <div class="mt-3 text-xs text-zinc-500">
+            @_filtered.Count of @(_tickets?.Count ?? 0) tickets
+        </div>
+    }
+}
+
+@code {
+    private enum LoadState { Loading, Loaded, NotConfigured, NoBoard, Error }
+
+    [SupplyParameterFromQuery(Name = "boardId")] public int? BoardIdParam { get; set; }
+
+    private int? _boardId;
+    private string _jqlInput = string.Empty;
+    private string _statusFilter = string.Empty;
+    private IReadOnlyList<Ticket>? _tickets;
+    private LoadState _state = LoadState.Loading;
+    private bool _loading;
+    private string? _error;
+
+    private IReadOnlyList<string> _availableStatuses =>
+        _tickets is null
+            ? Array.Empty<string>()
+            : _tickets.Select(t => t.Status).Distinct().OrderBy(s => s).ToList();
+
+    private IReadOnlyList<Ticket> _filtered =>
+        _tickets is null
+            ? Array.Empty<Ticket>()
+            : _tickets.Where(t => string.IsNullOrEmpty(_statusFilter) || t.Status == _statusFilter).ToList();
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            var connection = await JiraProvider.GetAsync();
+            if (connection is null) { _state = LoadState.NotConfigured; return; }
+
+            _boardId = BoardIdParam ?? await JiraProvider.GetActiveBoardIdAsync();
+            if (_boardId is null) { _state = LoadState.NoBoard; return; }
+
+            var jql = string.IsNullOrWhiteSpace(_jqlInput) ? null : _jqlInput.Trim();
+            _tickets = await Jira.GetBoardIssuesAsync(_boardId.Value, jql);
+            _state = LoadState.Loaded;
+        }
+        catch (Exception ex)
+        {
+            _state = LoadState.Error;
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task OnJqlKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            await LoadAsync();
+        }
+    }
+
+    private void OpenTicket(Ticket t) => Nav.NavigateTo($"/tickets/{t.Key}");
+
+    private static string StatusBadgeClasses(string status)
+    {
+        var baseClasses = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ";
+        var lower = status.ToLowerInvariant();
+        return baseClasses + lower switch
+        {
+            var s when s.Contains("done") || s.Contains("closed") || s.Contains("resolved")
+                => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+            var s when s.Contains("progress") || s.Contains("review")
+                => "bg-sky-500/10 text-sky-300 border-sky-500/30",
+            var s when s.Contains("block")
+                => "bg-red-500/10 text-red-300 border-red-500/30",
+            _ => "bg-zinc-800/70 text-zinc-300 border-zinc-700"
+        };
+    }
+}

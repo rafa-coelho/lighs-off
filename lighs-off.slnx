@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LightsOff.App/LightsOff.App.csproj" />
+    <Project Path="src/LightsOff.Cli/LightsOff.Cli.csproj" />
+    <Project Path="src/LightsOff.Core/LightsOff.Core.csproj" />
+    <Project Path="src/LightsOff.Infrastructure/LightsOff.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LightsOff.Tests/LightsOff.Tests.csproj" />
+  </Folder>
+</Solution>

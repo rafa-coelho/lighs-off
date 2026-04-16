@@ -1,0 +1,337 @@
+@page "/repos"
+@inject IRepositoryRegistry Registry
+@inject ToastService Toasts
+
+<PageTitle>Repositories</PageTitle>
+
+<PageHeader Title="Repositories" Description="Git repos that can be linked to tickets. Cloned locally under ~/.lightsoff/repos.">
+    <Actions>
+        <button type="button" @onclick="() => _browseOpen = true"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors">
+            <Icon Name="search" Class="w-4 h-4" />
+            Browse GitHub
+        </button>
+        <button type="button" @onclick="BeginAdd"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-zinc-800 hover:bg-zinc-800/60 text-zinc-200 text-sm font-medium transition-colors">
+            <Icon Name="plus" Class="w-4 h-4" />
+            Add manually
+        </button>
+    </Actions>
+</PageHeader>
+
+@if (_repos is null)
+{
+    <div class="flex items-center gap-3 text-sm text-zinc-500 py-12 justify-center"><Spinner /> Loading…</div>
+}
+else if (_repos.Count == 0)
+{
+    <EmptyState IconName="folder"
+                Title="No repositories yet"
+                Description="Browse your GitHub account or add a repo manually by clone URL.">
+        <div class="flex gap-2">
+            <button type="button" @onclick="() => _browseOpen = true"
+                    class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors">
+                <Icon Name="search" Class="w-4 h-4" />
+                Browse GitHub
+            </button>
+            <button type="button" @onclick="BeginAdd"
+                    class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-zinc-800 hover:bg-zinc-800/60 text-zinc-200 text-sm font-medium transition-colors">
+                <Icon Name="plus" Class="w-4 h-4" />
+                Add manually
+            </button>
+        </div>
+    </EmptyState>
+}
+else
+{
+    <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/30 overflow-hidden">
+        <table class="w-full text-sm">
+            <thead class="text-xs uppercase tracking-wider text-zinc-500 bg-zinc-950/50">
+                <tr>
+                    <th class="text-left font-medium py-3 px-4 w-48">Name</th>
+                    <th class="text-left font-medium py-3 px-4">Clone URL</th>
+                    <th class="text-left font-medium py-3 px-4 w-32">Default</th>
+                    <th class="text-left font-medium py-3 px-4 w-48">Image</th>
+                    <th class="text-right font-medium py-3 px-4 w-28">&nbsp;</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-zinc-800/60">
+                @foreach (var repo in _repos)
+                {
+                    <tr class="hover:bg-zinc-900/50 transition-colors group">
+                        <td class="py-3 px-4 font-medium">@repo.Name</td>
+                        <td class="py-3 px-4 text-zinc-400 font-mono text-xs truncate max-w-xs">@repo.CloneUrl</td>
+                        <td class="py-3 px-4"><code class="text-xs text-zinc-300">@repo.DefaultBranch</code></td>
+                        <td class="py-3 px-4 text-zinc-400 font-mono text-xs truncate max-w-xs">@(repo.Image ?? "(default)")</td>
+                        <td class="py-3 px-4 text-right">
+                            <div class="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button type="button" @onclick="() => BeginEdit(repo)"
+                                        class="p-1.5 rounded-md text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+                                        title="Edit">
+                                    <Icon Name="settings" Class="w-4 h-4" />
+                                </button>
+                                <button type="button" @onclick="() => BeginDelete(repo)"
+                                        class="p-1.5 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-950/40 transition-colors"
+                                        title="Delete">
+                                    <Icon Name="trash" Class="w-4 h-4" />
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+<!-- Add/Edit modal -->
+<Modal @bind-Open="_formOpen"
+       Title="@(_editing ? "Edit repository" : "Add repository")"
+       Description="@(_editing ? "Update clone URL, default branch, or container image." : "Provide a clone URL, default branch, and optional container image override.")">
+    <ChildContent>
+        <div class="space-y-4">
+            <div>
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Name</label>
+                <input @bind="_form.Name" disabled="@_editing" placeholder="app"
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors disabled:opacity-60 disabled:cursor-not-allowed" />
+                @if (_editing)
+                {
+                    <p class="text-xs text-zinc-500 mt-1.5">Name is immutable. Remove and re-add to rename.</p>
+                }
+                else
+                {
+                    <p class="text-xs text-zinc-500 mt-1.5">Short identifier, used as folder name. No spaces.</p>
+                }
+            </div>
+
+            <div>
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Clone URL</label>
+                <input @bind="_form.CloneUrl" placeholder="git@@github.com:org/app.git"
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono text-xs" />
+                <p class="text-xs text-zinc-500 mt-1.5">HTTPS (<code>https://…</code>) or SSH (<code>git@@…</code>) — both work with your stored GitHub PAT.</p>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3">
+                <div>
+                    <label class="block text-xs font-medium text-zinc-400 mb-1.5">Default branch</label>
+                    <input @bind="_form.DefaultBranch" placeholder="main"
+                           class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono text-xs" />
+                </div>
+                <div>
+                    <label class="block text-xs font-medium text-zinc-400 mb-1.5">Container image <span class="text-zinc-600">(optional)</span></label>
+                    <input @bind="_form.Image" placeholder="mcr.microsoft.com/devcontainers/base:ubuntu"
+                           class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono text-xs" />
+                </div>
+            </div>
+
+            @if (!string.IsNullOrEmpty(_formError))
+            {
+                <Alert Kind="Alert.AlertKind.Error">@_formError</Alert>
+            }
+        </div>
+    </ChildContent>
+    <Footer>
+        <button type="button" @onclick="CancelForm"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md text-sm text-zinc-300 hover:text-zinc-50 hover:bg-zinc-800/50 transition-colors">
+            Cancel
+        </button>
+        <button type="button" @onclick="SubmitFormAsync" disabled="@_saving"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            @if (_saving) { <Spinner /> <span>Saving…</span> }
+            else { <Icon Name="check" Class="w-4 h-4" /> <span>@(_editing ? "Save changes" : "Add repository")</span> }
+        </button>
+    </Footer>
+</Modal>
+
+<!-- Browse from GitHub modal -->
+<GitHubBrowseModal @bind-Open="_browseOpen"
+                   ExistingNames="@(_repos?.Select(r => r.Name).ToList() ?? new List<string>())"
+                   OnRegister="RegisterFromGitHubAsync" />
+
+<!-- Delete confirmation -->
+<Modal @bind-Open="_deleteOpen"
+       Title="Remove repository?"
+       Description="This only removes the registration. Cloned files under ~/.lightsoff/repos stay on disk."
+       Width="Modal.Size.Small">
+    <ChildContent>
+        @if (_deleting is not null)
+        {
+            <p class="text-sm text-zinc-300">
+                The repo <code class="text-emerald-400 font-medium">@_deleting.Name</code> will no longer be available when linking tickets. Existing workspaces that reference it continue to exist until destroyed.
+            </p>
+        }
+    </ChildContent>
+    <Footer>
+        <button type="button" @onclick="() => _deleteOpen = false"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md text-sm text-zinc-300 hover:text-zinc-50 hover:bg-zinc-800/50 transition-colors">
+            Cancel
+        </button>
+        <button type="button" @onclick="ConfirmDeleteAsync" disabled="@_saving"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-red-900/70 hover:bg-red-950/40 text-red-300 text-sm font-medium transition-colors disabled:opacity-50">
+            @if (_saving) { <Spinner /> <span>Removing…</span> }
+            else { <Icon Name="trash" Class="w-4 h-4" /> <span>Remove</span> }
+        </button>
+    </Footer>
+</Modal>
+
+@code {
+    private IReadOnlyList<Repository>? _repos;
+
+    private bool _formOpen;
+    private bool _editing;
+    private Repository _form = new();
+    private string? _formError;
+    private bool _saving;
+
+    private bool _deleteOpen;
+    private Repository? _deleting;
+
+    private bool _browseOpen;
+
+    protected override Task OnInitializedAsync() => ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        _repos = await Registry.ListAsync();
+    }
+
+    private void BeginAdd()
+    {
+        _editing = false;
+        _form = new Repository { DefaultBranch = "main" };
+        _formError = null;
+        _formOpen = true;
+    }
+
+    private void BeginEdit(Repository repo)
+    {
+        _editing = true;
+        _form = new Repository
+        {
+            Name = repo.Name,
+            CloneUrl = repo.CloneUrl,
+            DefaultBranch = repo.DefaultBranch,
+            Image = repo.Image
+        };
+        _formError = null;
+        _formOpen = true;
+    }
+
+    private void CancelForm() => _formOpen = false;
+
+    private async Task SubmitFormAsync()
+    {
+        _formError = Validate(_form, _editing);
+        if (_formError is not null) return;
+
+        _saving = true;
+        try
+        {
+            if (_editing)
+            {
+                await Registry.UpdateAsync(_form);
+                Toasts.Success($"Updated {_form.Name}.");
+            }
+            else
+            {
+                await Registry.AddAsync(_form);
+                Toasts.Success($"Added {_form.Name}.");
+            }
+            _formOpen = false;
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            _formError = ex.InnerException?.Message ?? ex.Message;
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void BeginDelete(Repository repo)
+    {
+        _deleting = repo;
+        _deleteOpen = true;
+    }
+
+    private async Task ConfirmDeleteAsync()
+    {
+        if (_deleting is null) return;
+        _saving = true;
+        try
+        {
+            await Registry.RemoveAsync(_deleting.Name);
+            Toasts.Info($"Removed {_deleting.Name}.");
+            _deleteOpen = false;
+            _deleting = null;
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private static string? Validate(Repository repo, bool isEdit)
+    {
+        if (string.IsNullOrWhiteSpace(repo.Name))
+            return "Name is required.";
+        if (!isEdit && repo.Name.Any(char.IsWhiteSpace))
+            return "Name cannot contain spaces.";
+        if (string.IsNullOrWhiteSpace(repo.CloneUrl))
+            return "Clone URL is required.";
+        if (!LooksLikeCloneUrl(repo.CloneUrl))
+            return "Clone URL should start with https://, http://, git@, or ssh://.";
+        if (string.IsNullOrWhiteSpace(repo.DefaultBranch))
+            return "Default branch is required.";
+        return null;
+    }
+
+    private static bool LooksLikeCloneUrl(string url)
+        => url.StartsWith("https://", StringComparison.Ordinal)
+        || url.StartsWith("http://", StringComparison.Ordinal)
+        || url.StartsWith("ssh://", StringComparison.Ordinal)
+        || url.StartsWith("git@", StringComparison.Ordinal);
+
+    private async Task RegisterFromGitHubAsync(IReadOnlyList<Repository> repos)
+    {
+        var added = 0;
+        var skipped = 0;
+        string? lastError = null;
+        foreach (var repo in repos)
+        {
+            try
+            {
+                await Registry.AddAsync(repo);
+                added++;
+            }
+            catch (Exception ex)
+            {
+                skipped++;
+                lastError = ex.InnerException?.Message ?? ex.Message;
+            }
+        }
+
+        await ReloadAsync();
+        _browseOpen = false;
+
+        if (added > 0 && skipped == 0)
+        {
+            Toasts.Success($"Registered {added} repositor{(added == 1 ? "y" : "ies")}.");
+        }
+        else if (added > 0 && skipped > 0)
+        {
+            Toasts.Warning($"Registered {added}, skipped {skipped} ({lastError}).");
+        }
+        else if (added == 0 && skipped > 0)
+        {
+            Toasts.Error(lastError ?? "Could not register any selected repositories.");
+        }
+    }
+}

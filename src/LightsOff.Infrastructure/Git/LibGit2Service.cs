@@ -1,0 +1,121 @@
+using LightsOff.Core.Abstractions;
+using LibGit2Sharp;
+using Microsoft.Extensions.Logging;
+using Repository = LightsOff.Core.Domain.Repository;
+using GitRepo = LibGit2Sharp.Repository;
+
+namespace LightsOff.Infrastructure.Git;
+
+public class LibGit2Service : IGitService
+{
+    private readonly ISecretStore _secrets;
+    private readonly ILogger<LibGit2Service> _logger;
+
+    public LibGit2Service(ISecretStore secrets, ILogger<LibGit2Service> logger)
+    {
+        _secrets = secrets;
+        _logger = logger;
+    }
+
+    public async Task EnsureClonedAsync(Repository repo, string destination, CancellationToken ct = default)
+    {
+        if (IsGitRepo(destination))
+        {
+            _logger.LogDebug("Repo already cloned at {Destination}", destination);
+            return;
+        }
+
+        Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+        var credentials = await GetCredentialsAsync(ct).ConfigureAwait(false);
+
+        await Task.Run(() =>
+        {
+            var options = new CloneOptions();
+            if (credentials is not null)
+            {
+                options.FetchOptions.CredentialsProvider = (_, _, _) => credentials;
+            }
+            GitRepo.Clone(repo.CloneUrl, destination, options);
+        }, ct).ConfigureAwait(false);
+
+        _logger.LogInformation("Cloned {Repo} to {Destination}", repo.Name, destination);
+    }
+
+    public async Task FetchAndPullDefaultAsync(Repository repo, string destination, CancellationToken ct = default)
+    {
+        var credentials = await GetCredentialsAsync(ct).ConfigureAwait(false);
+
+        await Task.Run(() =>
+        {
+            using var git = new GitRepo(destination);
+            var remote = git.Network.Remotes["origin"];
+            var fetchOptions = new FetchOptions();
+            if (credentials is not null)
+            {
+                fetchOptions.CredentialsProvider = (_, _, _) => credentials;
+            }
+            var refSpecs = remote.FetchRefSpecs.Select(r => r.Specification).ToList();
+            Commands.Fetch(git, remote.Name, refSpecs, fetchOptions, logMessage: null);
+
+            var defaultBranch = git.Branches[repo.DefaultBranch]
+                               ?? git.Branches[$"origin/{repo.DefaultBranch}"]
+                               ?? throw new InvalidOperationException(
+                                   $"Default branch '{repo.DefaultBranch}' not found in {repo.Name}.");
+
+            Branch local = defaultBranch.IsRemote
+                ? git.CreateBranch(repo.DefaultBranch, defaultBranch.Tip)
+                : defaultBranch;
+
+            if (defaultBranch.IsRemote)
+            {
+                git.Branches.Update(local,
+                    b => b.TrackedBranch = defaultBranch.CanonicalName);
+            }
+
+            Commands.Checkout(git, local);
+
+            var trackingBranch = local.TrackedBranch ?? git.Branches[$"origin/{repo.DefaultBranch}"];
+            if (trackingBranch is not null)
+            {
+                git.Reset(ResetMode.Hard, trackingBranch.Tip);
+            }
+        }, ct).ConfigureAwait(false);
+    }
+
+    public Task CreateAndCheckoutBranchAsync(string repoPath, string branchName, CancellationToken ct = default)
+    {
+        return Task.Run(() =>
+        {
+            using var git = new GitRepo(repoPath);
+            var existing = git.Branches[branchName];
+            var branch = existing ?? git.CreateBranch(branchName);
+            Commands.Checkout(git, branch);
+        }, ct);
+    }
+
+    private static bool IsGitRepo(string path)
+    {
+        if (!Directory.Exists(path))
+        {
+            return false;
+        }
+        try
+        {
+            return GitRepo.IsValid(path);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private async Task<UsernamePasswordCredentials?> GetCredentialsAsync(CancellationToken ct)
+    {
+        var pat = await _secrets.GetAsync(SecretKeys.GitHubPat, ct).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(pat))
+        {
+            return null;
+        }
+        return new UsernamePasswordCredentials { Username = pat, Password = string.Empty };
+    }
+}

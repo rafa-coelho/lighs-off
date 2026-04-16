@@ -1,0 +1,27 @@
+@* Centered empty/placeholder state. *@
+<div class="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/40 px-6 py-12 text-center">
+    @if (!string.IsNullOrEmpty(IconName))
+    {
+        <div class="mx-auto w-10 h-10 rounded-full bg-zinc-900 flex items-center justify-center mb-4 text-zinc-500">
+            <Icon Name="@IconName" Class="w-5 h-5" />
+        </div>
+    }
+    <div class="text-sm font-medium text-zinc-300">@Title</div>
+    @if (!string.IsNullOrEmpty(Description))
+    {
+        <p class="text-sm text-zinc-500 mt-1 max-w-md mx-auto">@Description</p>
+    }
+    @if (ChildContent is not null)
+    {
+        <div class="mt-5 flex justify-center">
+            @ChildContent
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter] public string IconName { get; set; } = string.Empty;
+    [Parameter, EditorRequired] public string Title { get; set; } = string.Empty;
+    [Parameter] public string? Description { get; set; }
+    [Parameter] public RenderFragment? ChildContent { get; set; }
+}

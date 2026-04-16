@@ -1,0 +1,132 @@
+@page "/boards"
+@inject IJiraClient Jira
+@inject IJiraConnectionProvider JiraProvider
+@inject ToastService Toasts
+@inject NavigationManager Nav
+
+<PageTitle>Boards</PageTitle>
+
+<PageHeader Title="Boards" Description="Jira boards from your active site. Pick one as the default for the Tickets page.">
+    <Actions>
+        <button type="button" @onclick="LoadAsync" disabled="@_loading"
+                class="inline-flex items-center gap-2 h-9 px-3 rounded-md text-sm text-zinc-300 hover:text-zinc-50 hover:bg-zinc-800/50 transition-colors disabled:opacity-50">
+            @if (_loading) { <Spinner /> } else { <Icon Name="refresh" Class="w-4 h-4" /> }
+            <span>Refresh</span>
+        </button>
+    </Actions>
+</PageHeader>
+
+@if (_state == LoadState.NotConfigured)
+{
+    <Alert Kind="Alert.AlertKind.Warning">
+        Jira is not configured. <a href="/settings" class="text-amber-100 underline underline-offset-2">Open settings</a>.
+    </Alert>
+}
+else if (_state == LoadState.Error)
+{
+    <Alert Kind="Alert.AlertKind.Error">@_error</Alert>
+}
+else if (_loading && _boards is null)
+{
+    <div class="flex items-center gap-3 text-sm text-zinc-500 py-12 justify-center">
+        <Spinner /> Loading boards…
+    </div>
+}
+else if (_boards is { Count: 0 })
+{
+    <EmptyState IconName="dashboard" Title="No boards returned" Description="Your Jira account has no boards yet, or lacks access." />
+}
+else if (_boards is not null)
+{
+    <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/30 overflow-hidden">
+        <table class="w-full text-sm">
+            <thead class="text-xs uppercase tracking-wider text-zinc-500 bg-zinc-950/50">
+                <tr>
+                    <th class="text-left font-medium py-3 px-4 w-20">ID</th>
+                    <th class="text-left font-medium py-3 px-4">Name</th>
+                    <th class="text-left font-medium py-3 px-4 w-32">Project</th>
+                    <th class="text-left font-medium py-3 px-4 w-28">Type</th>
+                    <th class="text-right font-medium py-3 px-4 w-56">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-zinc-800/60">
+                @foreach (var board in _boards)
+                {
+                    <tr class="hover:bg-zinc-900/50 transition-colors">
+                        <td class="py-3 px-4 text-zinc-500 tabular-nums">@board.Id</td>
+                        <td class="py-3 px-4">
+                            <div class="flex items-center gap-2">
+                                @if (_activeBoardId == board.Id)
+                                {
+                                    <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 uppercase tracking-wider">Active</span>
+                                }
+                                <span class="font-medium">@board.Name</span>
+                            </div>
+                        </td>
+                        <td class="py-3 px-4 text-zinc-400">@(board.ProjectKey ?? "—")</td>
+                        <td class="py-3 px-4 text-zinc-400">@(board.Type ?? "—")</td>
+                        <td class="py-3 px-4">
+                            <div class="flex justify-end gap-2">
+                                <button type="button"
+                                        @onclick="() => SetActiveAsync(board.Id)"
+                                        disabled="@(_activeBoardId == board.Id)"
+                                        class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-xs font-medium bg-zinc-800 hover:bg-zinc-700 text-zinc-100 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                                    Set active
+                                </button>
+                                <button type="button"
+                                        @onclick="@(() => Nav.NavigateTo($"/tickets?boardId={board.Id}"))"
+                                        class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-xs font-medium bg-emerald-500 hover:bg-emerald-400 text-emerald-950 transition-colors">
+                                    Tickets
+                                    <Icon Name="chevron-right" Class="w-3.5 h-3.5" />
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@code {
+    private enum LoadState { Loading, Loaded, NotConfigured, Error }
+
+    private IReadOnlyList<Board>? _boards;
+    private int? _activeBoardId;
+    private LoadState _state = LoadState.Loading;
+    private bool _loading;
+    private string? _error;
+
+    protected override Task OnInitializedAsync() => LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        try
+        {
+            var connection = await JiraProvider.GetAsync();
+            if (connection is null) { _state = LoadState.NotConfigured; return; }
+
+            _activeBoardId = await JiraProvider.GetActiveBoardIdAsync();
+            _boards = await Jira.GetBoardsAsync();
+            _state = LoadState.Loaded;
+        }
+        catch (Exception ex)
+        {
+            _state = LoadState.Error;
+            _error = ex.Message;
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SetActiveAsync(int boardId)
+    {
+        await JiraProvider.SetActiveBoardIdAsync(boardId);
+        _activeBoardId = boardId;
+        Toasts.Success("Active board updated.");
+    }
+}

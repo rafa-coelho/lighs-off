@@ -1,0 +1,492 @@
+@page "/tickets/{TicketKey}"
+@using LightsOff.Core.Configuration
+@using LightsOff.Core.Utilities
+@using Microsoft.Extensions.Options
+@inject IJiraClient Jira
+@inject IJiraConnectionProvider JiraProvider
+@inject IGitHubClient GitHub
+@inject IRepositoryRegistry Registry
+@inject IWorkspaceManager Workspaces
+@inject IDockerService Docker
+@inject IOptions<LightsOffOptions> OptionsAccessor
+@inject ToastService Toasts
+@inject NavigationManager Nav
+@inject IJSRuntime JS
+
+<PageTitle>@TicketKey</PageTitle>
+
+<nav class="flex items-center gap-2 text-sm text-zinc-500 mb-4">
+    <a href="/tickets" class="hover:text-zinc-200 inline-flex items-center gap-1.5">
+        <Icon Name="arrow-left" Class="w-4 h-4" />
+        Tickets
+    </a>
+    <span class="text-zinc-700">/</span>
+    <span class="text-zinc-300"><code>@TicketKey</code></span>
+</nav>
+
+@if (_state == LoadState.NotConfigured)
+{
+    <Alert Kind="Alert.AlertKind.Warning">
+        Jira is not configured. <a href="/settings" class="text-amber-100 underline underline-offset-2">Open settings</a>.
+    </Alert>
+}
+else if (_state == LoadState.NotFound)
+{
+    <Alert Kind="Alert.AlertKind.Warning">Ticket <code>@TicketKey</code> not found in the configured Jira site.</Alert>
+}
+else if (_state == LoadState.Error)
+{
+    <Alert Kind="Alert.AlertKind.Error">@_error</Alert>
+}
+else if (_ticket is null)
+{
+    <div class="flex items-center gap-3 text-sm text-zinc-500 py-12 justify-center"><Spinner /> Loading…</div>
+}
+else
+{
+    <div class="mb-6">
+        <div class="flex items-start gap-3 mb-2">
+            <code class="text-xl font-semibold text-emerald-400">@_ticket.Key</code>
+            <span class="@StatusBadgeClasses(_ticket.Status) mt-1.5">@_ticket.Status</span>
+        </div>
+        <h1 class="text-2xl font-semibold tracking-tight">@_ticket.Summary</h1>
+    </div>
+
+    <div class="grid lg:grid-cols-3 gap-5">
+        <!-- Left: ticket metadata -->
+        <section class="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-6">
+            <h2 class="text-sm font-semibold mb-4">Details</h2>
+            <dl class="space-y-3 text-sm">
+                <div>
+                    <dt class="text-xs uppercase tracking-wider text-zinc-500">Type</dt>
+                    <dd class="text-zinc-200 mt-0.5">@_ticket.Type</dd>
+                </div>
+                <div>
+                    <dt class="text-xs uppercase tracking-wider text-zinc-500">Assignee</dt>
+                    <dd class="text-zinc-200 mt-0.5">@(_ticket.Assignee ?? "Unassigned")</dd>
+                </div>
+                <div class="pt-2">
+                    <a href="@_ticket.Url" target="_blank" rel="noopener"
+                       class="inline-flex items-center gap-1.5 text-emerald-400 hover:text-emerald-300 text-sm">
+                        Open in Jira
+                        <Icon Name="external" Class="w-4 h-4" />
+                    </a>
+                </div>
+            </dl>
+        </section>
+
+        <!-- Right: workspace -->
+        <section class="lg:col-span-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-6">
+            @if (_existingWorkspace is not null)
+            {
+                <div class="flex items-start justify-between mb-4 gap-3">
+                    <div>
+                        <h2 class="text-sm font-semibold">Workspace</h2>
+                        <p class="text-xs text-zinc-500 mt-0.5">Created @_existingWorkspace.CreatedAt.ToLocalTime().ToString("g")</p>
+                    </div>
+                    <span class="@WorkspaceStatusBadge(_existingWorkspace.Status)">@_existingWorkspace.Status</span>
+                </div>
+
+                <dl class="space-y-3 text-sm mb-5">
+                    <div>
+                        <dt class="text-xs uppercase tracking-wider text-zinc-500">Repositories</dt>
+                        <dd class="mt-1 flex flex-wrap gap-1">
+                            @foreach (var link in _existingWorkspace.Links)
+                            {
+                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-zinc-800 text-zinc-300 border border-zinc-700">
+                                    @link.RepositoryName
+                                    <span class="text-zinc-500">·</span>
+                                    <code class="text-zinc-400">@link.BranchName</code>
+                                </span>
+                            }
+                        </dd>
+                    </div>
+                    <div>
+                        <dt class="text-xs uppercase tracking-wider text-zinc-500">Root path</dt>
+                        <dd class="text-zinc-300 mt-0.5 font-mono text-xs">@_existingWorkspace.RootPath</dd>
+                    </div>
+                    @if (!string.IsNullOrEmpty(_existingWorkspace.ContainerName))
+                    {
+                        <div>
+                            <dt class="text-xs uppercase tracking-wider text-zinc-500">Container</dt>
+                            <dd class="text-zinc-300 mt-0.5 font-mono text-xs">@_existingWorkspace.ContainerName</dd>
+                        </div>
+                        <div>
+                            <dt class="text-xs uppercase tracking-wider text-zinc-500">Attach</dt>
+                            <dd class="mt-1 flex items-center gap-2">
+                                <code class="flex-1 text-xs font-mono text-emerald-300 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 truncate">
+                                    docker exec -it @_existingWorkspace.ContainerName bash
+                                </code>
+                                <button type="button" @onclick="CopyAttachCommandAsync"
+                                        class="p-1.5 rounded-md text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
+                                        title="Copy">
+                                    <Icon Name="copy" Class="w-4 h-4" />
+                                </button>
+                            </dd>
+                        </div>
+                    }
+                </dl>
+
+                <div class="flex gap-2 pt-2 border-t border-zinc-800/80">
+                    <a href="/workspaces"
+                       class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-sm font-medium transition-colors">
+                        <Icon Name="terminal" Class="w-4 h-4" />
+                        All workspaces
+                    </a>
+                    <button type="button" @onclick="DestroyWorkspaceAsync" disabled="@_destroying"
+                            class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-red-900/70 hover:bg-red-950/40 text-red-300 text-sm font-medium transition-colors disabled:opacity-50">
+                        @if (_destroying) { <Spinner /> <span>Destroying…</span> }
+                        else { <Icon Name="trash" Class="w-4 h-4" /> <span>Destroy workspace</span> }
+                    </button>
+                </div>
+            }
+            else
+            {
+                <div class="flex items-center justify-between mb-5">
+                    <div>
+                        <h2 class="text-sm font-semibold">Create workspace</h2>
+                        <p class="text-xs text-zinc-500 mt-0.5">Pick repos from your GitHub, then clone + branch + container in one shot.</p>
+                    </div>
+                    <button type="button" @onclick="LoadGitHubReposAsync" disabled="@_loadingRepos"
+                            class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1 disabled:opacity-40">
+                        @if (_loadingRepos) { <Spinner Class="w-3 h-3" /> }
+                        else { <Icon Name="refresh" Class="w-3 h-3" /> }
+                        <span>@(_loadingRepos ? "Loading" : "Refresh")</span>
+                    </button>
+                </div>
+
+                <!-- Repo search + list (GitHub-backed) -->
+                <div class="mb-4">
+                    <div class="relative mb-2">
+                        <div class="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600">
+                            <Icon Name="search" Class="w-4 h-4" />
+                        </div>
+                        <input @bind="_query" @bind:event="oninput"
+                               placeholder="Filter by owner, name, or description…"
+                               class="w-full bg-zinc-950 border border-zinc-800 rounded-md pl-9 pr-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
+                    </div>
+
+                    @if (_loadingRepos)
+                    {
+                        <div class="flex items-center gap-3 text-sm text-zinc-500 py-6 justify-center border border-zinc-800 rounded-md bg-zinc-950/60">
+                            <Spinner /> Fetching repositories…
+                        </div>
+                    }
+                    else if (_reposError is not null)
+                    {
+                        <Alert Kind="Alert.AlertKind.Error">@_reposError</Alert>
+                    }
+                    else if (_githubRepos is null or { Count: 0 })
+                    {
+                        <Alert Kind="Alert.AlertKind.Info">
+                            No repositories visible to your token. Configure GitHub in <a href="/settings" class="text-sky-100 underline underline-offset-2">Settings</a>.
+                        </Alert>
+                    }
+                    else
+                    {
+                        <div class="rounded-md border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800/80 max-h-80 overflow-y-auto">
+                            @foreach (var repo in _filteredRepos)
+                            {
+                                var isSelected = _selectedRepoFullNames.Contains(repo.FullName);
+                                <label class="flex items-start gap-3 px-3 py-2.5 cursor-pointer hover:bg-zinc-900/60 transition-colors" @key="repo.FullName">
+                                    <input type="checkbox" checked="@isSelected"
+                                           @onchange="@(e => ToggleRepo(repo, (bool)e.Value!))"
+                                           class="mt-1 w-4 h-4 rounded border-zinc-700 bg-zinc-950 text-emerald-500 focus:ring-2 focus:ring-emerald-500/40 focus:ring-offset-0" />
+                                    <div class="flex-1 min-w-0">
+                                        <div class="flex items-center gap-2 flex-wrap">
+                                            <span class="text-sm font-medium text-zinc-100">
+                                                <span class="text-zinc-500">@repo.OwnerLogin/</span>@repo.Name
+                                            </span>
+                                            <code class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800/60 text-zinc-400 border border-zinc-700">@repo.DefaultBranch</code>
+                                            @if (repo.Private)
+                                            {
+                                                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-zinc-800 text-zinc-400 border border-zinc-700 uppercase tracking-wider">private</span>
+                                            }
+                                        </div>
+                                        @if (!string.IsNullOrEmpty(repo.Description))
+                                        {
+                                            <div class="text-xs text-zinc-500 mt-0.5 truncate">@repo.Description</div>
+                                        }
+                                    </div>
+                                </label>
+                            }
+                        </div>
+                        <div class="text-xs text-zinc-500 mt-1.5">
+                            @_filteredRepos.Count of @_githubRepos.Count repos
+                            @if (_selectedRepoFullNames.Count > 0)
+                            {
+                                <span>· @_selectedRepoFullNames.Count selected</span>
+                            }
+                        </div>
+                    }
+                </div>
+
+                <!-- Branch name -->
+                <div class="mt-4">
+                    <label class="block text-xs font-medium text-zinc-400 mb-1.5">
+                        Branch name <span class="text-zinc-600">(created on every selected repo)</span>
+                    </label>
+                    <input @bind="_branchName" @bind:event="oninput"
+                           class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono text-xs" />
+                    <p class="text-xs text-zinc-500 mt-1.5">Default template: <code>@_options.BranchNameTemplate</code></p>
+                </div>
+
+                @if (_dockerAvailable == false)
+                {
+                    <div class="mt-4">
+                        <Alert Kind="Alert.AlertKind.Warning">
+                            Docker daemon not reachable. The workspace will still be created (clone + branch) but without a container. Start Docker and re-run to add one.
+                        </Alert>
+                    </div>
+                }
+
+                @if (!string.IsNullOrEmpty(_createError))
+                {
+                    <div class="mt-4"><Alert Kind="Alert.AlertKind.Error">@_createError</Alert></div>
+                }
+
+                <div class="flex gap-2 pt-5 mt-5 border-t border-zinc-800/80">
+                    <button type="button" @onclick="CreateWorkspaceAsync"
+                            disabled="@(_creating || _selectedRepoFullNames.Count == 0 || string.IsNullOrWhiteSpace(_branchName))"
+                            class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                        @if (_creating) { <Spinner /> <span>Creating…</span> }
+                        else
+                        {
+                            <Icon Name="play" Class="w-4 h-4" />
+                            <span>Create workspace</span>
+                            @if (_selectedRepoFullNames.Count > 0)
+                            {
+                                <span class="text-emerald-950/60 font-normal">· @_selectedRepoFullNames.Count repo@(_selectedRepoFullNames.Count == 1 ? "" : "s")</span>
+                            }
+                        }
+                    </button>
+                </div>
+            }
+        </section>
+    </div>
+}
+
+@code {
+    private enum LoadState { Loading, Loaded, NotConfigured, NotFound, Error }
+
+    [Parameter] public string TicketKey { get; set; } = string.Empty;
+
+    private LightsOffOptions _options = new();
+    private Ticket? _ticket;
+    private LoadState _state = LoadState.Loading;
+    private string? _error;
+
+    private Workspace? _existingWorkspace;
+    private bool? _dockerAvailable;
+
+    // GitHub browse state
+    private IReadOnlyList<GitHubRepo>? _githubRepos;
+    private bool _loadingRepos;
+    private string? _reposError;
+    private string _query = string.Empty;
+    private readonly HashSet<string> _selectedRepoFullNames = new(StringComparer.OrdinalIgnoreCase);
+
+    private string _branchName = string.Empty;
+
+    private bool _creating;
+    private bool _destroying;
+    private string? _createError;
+
+    private IReadOnlyList<GitHubRepo> _filteredRepos
+    {
+        get
+        {
+            if (_githubRepos is null) return Array.Empty<GitHubRepo>();
+            if (string.IsNullOrWhiteSpace(_query)) return _githubRepos;
+            var q = _query.Trim();
+            return _githubRepos.Where(r =>
+                r.FullName.Contains(q, StringComparison.OrdinalIgnoreCase)
+                || (r.Description?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false)
+            ).ToList();
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        _options = OptionsAccessor.Value;
+        _branchName = TextSlug.BuildBranchName(_options.BranchNameTemplate, TicketKey, string.Empty);
+
+        try
+        {
+            var connection = await JiraProvider.GetAsync();
+            if (connection is null) { _state = LoadState.NotConfigured; return; }
+
+            var ticketTask = Jira.GetIssueAsync(TicketKey);
+            var existingTask = Workspaces.GetAsync(TicketKey);
+            var dockerTask = Docker.IsDockerAvailableAsync();
+
+            await Task.WhenAll(ticketTask, existingTask, dockerTask);
+
+            _ticket = await ticketTask;
+            _existingWorkspace = await existingTask;
+            _dockerAvailable = await dockerTask;
+
+            if (_ticket is null)
+            {
+                _state = LoadState.NotFound;
+                return;
+            }
+
+            _branchName = TextSlug.BuildBranchName(_options.BranchNameTemplate, _ticket.Key, _ticket.Summary);
+            _state = LoadState.Loaded;
+
+            if (_existingWorkspace is null)
+            {
+                _ = LoadGitHubReposAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _state = LoadState.Error;
+            _error = ex.Message;
+        }
+    }
+
+    private async Task LoadGitHubReposAsync()
+    {
+        _loadingRepos = true;
+        _reposError = null;
+        _githubRepos = null;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            _githubRepos = await GitHub.ListAccessibleReposAsync();
+        }
+        catch (Exception ex)
+        {
+            _reposError = ex.Message;
+        }
+        finally
+        {
+            _loadingRepos = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void ToggleRepo(GitHubRepo repo, bool selected)
+    {
+        if (selected) _selectedRepoFullNames.Add(repo.FullName);
+        else _selectedRepoFullNames.Remove(repo.FullName);
+    }
+
+    private async Task CreateWorkspaceAsync()
+    {
+        if (_ticket is null || _selectedRepoFullNames.Count == 0 || _githubRepos is null) return;
+
+        _creating = true;
+        _createError = null;
+        try
+        {
+            // Auto-register any selected repos that aren't yet in the registry (keeps CLI + reuse working),
+            // then create the workspace referencing them by name.
+            var existingNames = (await Registry.ListAsync())
+                .Select(r => r.Name)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            var selectedRepos = _githubRepos
+                .Where(r => _selectedRepoFullNames.Contains(r.FullName))
+                .ToList();
+
+            foreach (var gh in selectedRepos)
+            {
+                if (!existingNames.Contains(gh.Name))
+                {
+                    await Registry.AddAsync(new Repository
+                    {
+                        Name = gh.Name,
+                        CloneUrl = gh.CloneUrl,
+                        DefaultBranch = gh.DefaultBranch
+                    });
+                }
+            }
+
+            var request = new CreateWorkspaceRequest(
+                _ticket.Key,
+                _ticket.Summary,
+                selectedRepos.Select(r => r.Name).ToList(),
+                BranchNameOverride: _branchName.Trim(),
+                StartContainer: _dockerAvailable == true);
+
+            _existingWorkspace = await Workspaces.CreateAsync(request);
+            Toasts.Success($"Workspace created for {_ticket.Key}.");
+        }
+        catch (Exception ex)
+        {
+            _createError = ex.InnerException?.Message ?? ex.Message;
+        }
+        finally
+        {
+            _creating = false;
+        }
+    }
+
+    private async Task DestroyWorkspaceAsync()
+    {
+        if (_existingWorkspace is null) return;
+        _destroying = true;
+        try
+        {
+            await Workspaces.DestroyAsync(_existingWorkspace.TicketKey);
+            Toasts.Info($"Workspace {_existingWorkspace.TicketKey} destroyed.");
+            _existingWorkspace = null;
+            _selectedRepoFullNames.Clear();
+            _ = LoadGitHubReposAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            _destroying = false;
+        }
+    }
+
+    private async Task CopyAttachCommandAsync()
+    {
+        if (_existingWorkspace?.ContainerName is null) return;
+        var cmd = $"docker exec -it {_existingWorkspace.ContainerName} bash";
+        try
+        {
+            await JS.InvokeVoidAsync("navigator.clipboard.writeText", cmd);
+            Toasts.Success("Copied to clipboard.");
+        }
+        catch
+        {
+            Toasts.Info(cmd);
+        }
+    }
+
+    private static string StatusBadgeClasses(string status)
+    {
+        var baseClasses = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ";
+        var lower = status.ToLowerInvariant();
+        return baseClasses + lower switch
+        {
+            var s when s.Contains("done") || s.Contains("closed") || s.Contains("resolved")
+                => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+            var s when s.Contains("progress") || s.Contains("review")
+                => "bg-sky-500/10 text-sky-300 border-sky-500/30",
+            var s when s.Contains("block")
+                => "bg-red-500/10 text-red-300 border-red-500/30",
+            _ => "bg-zinc-800/70 text-zinc-300 border-zinc-700"
+        };
+    }
+
+    private static string WorkspaceStatusBadge(WorkspaceStatus status)
+    {
+        var baseClasses = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ";
+        return baseClasses + status switch
+        {
+            WorkspaceStatus.Running => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+            WorkspaceStatus.Stopped => "bg-zinc-800/70 text-zinc-400 border-zinc-700",
+            WorkspaceStatus.Destroyed => "bg-red-500/10 text-red-400 border-red-500/30",
+            _ => "bg-sky-500/10 text-sky-300 border-sky-500/30"
+        };
+    }
+}

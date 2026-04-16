@@ -1,0 +1,35 @@
+## .NET build output
+bin/
+obj/
+*.user
+*.userosscache
+*.suo
+*.userprefs
+.vs/
+.vscode/
+.idea/
+
+## Claude local settings
+.claude/
+
+## Rider/VS cache
+*.cache
+*.tmp
+.swp
+
+## NuGet
+*.nupkg
+*.snupkg
+
+## Runtime data
+.lightsoff/
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Node (if UI tooling gets added)
+node_modules/
+dist/
+.env
+*.local

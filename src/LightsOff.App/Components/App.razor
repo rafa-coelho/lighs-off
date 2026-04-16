@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <base href="/" />
+    <title>lights-off</title>
+    <script src="https://unpkg.com/@@tailwindcss/browser@4"></script>
+    <link rel="stylesheet" href="@Assets["app.css"]" />
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+
+<body class="min-h-screen bg-zinc-950 text-zinc-100 antialiased font-sans selection:bg-emerald-500/30 selection:text-emerald-100">
+    <Routes @rendermode="InteractiveServer" />
+    <div id="blazor-error-ui" data-nosnippet>
+        <span>An unhandled error has occurred.</span>
+        <a href="." class="underline ml-2">Reload</a>
+        <span class="dismiss">✕</span>
+    </div>
+    <script src="@Assets["_framework/blazor.web.js"]"></script>
+</body>
+
+</html>

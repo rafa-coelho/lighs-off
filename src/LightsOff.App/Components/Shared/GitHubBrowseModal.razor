@@ -1,0 +1,283 @@
+@inject IGitHubClient GitHub
+
+<Modal Open="Open" OpenChanged="OpenChanged"
+       Title="Browse from GitHub"
+       Description="Pick repositories accessible to your stored PAT. Check the ones to register — clone URL, default branch, and name are pre-filled."
+       Width="Modal.Size.Large">
+    <ChildContent>
+        @if (_loading)
+        {
+            <div class="flex items-center gap-3 text-sm text-zinc-500 py-10 justify-center"><Spinner /> Fetching your repositories…</div>
+        }
+        else if (_error is not null)
+        {
+            <Alert Kind="Alert.AlertKind.Error">@_error</Alert>
+        }
+        else if (_repos is null or { Count: 0 })
+        {
+            <Alert Kind="Alert.AlertKind.Info">
+                <div class="space-y-1">
+                    <div>No organization repositories visible to this PAT.</div>
+                    <div class="text-xs text-sky-300/80">
+                        Check that the token has <code>Metadata</code> and <code>Contents</code> (read) permissions on the org,
+                        and that SSO isn't blocking it on
+                        <a href="https://github.com/settings/tokens" target="_blank" rel="noopener" class="underline">github.com/settings/tokens</a>.
+                    </div>
+                </div>
+            </Alert>
+        }
+        else
+        {
+            <div class="flex flex-col md:flex-row gap-3 mb-3">
+                <div class="flex-1 relative">
+                    <div class="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600">
+                        <Icon Name="search" Class="w-4 h-4" />
+                    </div>
+                    <input @bind="_query" @bind:event="oninput"
+                           placeholder="Filter by owner, name, or description…"
+                           class="w-full bg-zinc-950 border border-zinc-800 rounded-md pl-9 pr-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
+                </div>
+                <div class="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-0.5 text-xs">
+                    <button type="button" @onclick="@(() => _useSsh = false)"
+                            class="@TabClass(!_useSsh)">HTTPS</button>
+                    <button type="button" @onclick="@(() => _useSsh = true)"
+                            class="@TabClass(_useSsh)">SSH</button>
+                </div>
+            </div>
+
+            @if (_owners.Count > 1)
+            {
+                <div class="flex flex-wrap gap-1.5 mb-3">
+                    <button type="button" @onclick="@(() => _ownerFilter = null)"
+                            class="@ChipClass(_ownerFilter is null)">
+                        All <span class="ml-1 text-zinc-600">@_repos.Count</span>
+                    </button>
+                    @foreach (var owner in _owners)
+                    {
+                        var count = _repos.Count(r => string.Equals(r.OwnerLogin, owner, StringComparison.OrdinalIgnoreCase));
+                        <button type="button" @onclick="@(() => _ownerFilter = owner)"
+                                class="@ChipClass(string.Equals(_ownerFilter, owner, StringComparison.OrdinalIgnoreCase))">
+                            @owner <span class="ml-1 text-zinc-600">@count</span>
+                        </button>
+                    }
+                </div>
+            }
+
+            <div class="max-h-[26rem] overflow-y-auto rounded-lg border border-zinc-800/80 divide-y divide-zinc-800/60">
+                @foreach (var repo in _filtered)
+                {
+                    var alreadyRegistered = ExistingNames.Contains(repo.Name, StringComparer.OrdinalIgnoreCase);
+                    var isSelected = _selected.Contains(repo.FullName);
+                    <label class="@RowClass(alreadyRegistered, isSelected)" @key="repo.FullName">
+                        <input type="checkbox" disabled="@alreadyRegistered"
+                               checked="@isSelected"
+                               @onchange="@(e => ToggleSelected(repo, (bool)e.Value!))"
+                               class="mt-1 w-4 h-4 rounded border-zinc-700 bg-zinc-950 text-emerald-500 focus:ring-2 focus:ring-emerald-500/40 focus:ring-offset-0 disabled:opacity-40" />
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <span class="text-sm font-medium text-zinc-100">
+                                    <span class="text-zinc-500">@repo.OwnerLogin/</span>@repo.Name
+                                </span>
+                                @if (repo.Private)
+                                {
+                                    <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-zinc-800 text-zinc-400 border border-zinc-700 uppercase tracking-wider">Private</span>
+                                }
+                                <code class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800/60 text-zinc-400 border border-zinc-700">@repo.DefaultBranch</code>
+                                @if (alreadyRegistered)
+                                {
+                                    <span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/10 text-emerald-300 border border-emerald-500/30 uppercase tracking-wider">
+                                        <Icon Name="check" Class="w-3 h-3" />
+                                        registered
+                                    </span>
+                                }
+                            </div>
+                            @if (!string.IsNullOrEmpty(repo.Description))
+                            {
+                                <div class="text-xs text-zinc-500 mt-0.5 truncate">@repo.Description</div>
+                            }
+                        </div>
+                        @if (repo.PushedAt is not null)
+                        {
+                            <div class="text-[10px] text-zinc-600 tabular-nums whitespace-nowrap mt-1">
+                                pushed @FormatRelative(repo.PushedAt.Value)
+                            </div>
+                        }
+                    </label>
+                }
+            </div>
+
+            <div class="text-xs text-zinc-500 mt-3">
+                @_filtered.Count of @_repos.Count repos @(string.IsNullOrEmpty(_query) ? "" : "matched")
+                @if (_selected.Count > 0)
+                {
+                    <span>· @_selected.Count selected</span>
+                }
+            </div>
+        }
+    </ChildContent>
+    <Footer>
+        <button type="button" @onclick="Cancel"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md text-sm text-zinc-300 hover:text-zinc-50 hover:bg-zinc-800/50 transition-colors">
+            Cancel
+        </button>
+        <button type="button" @onclick="RegisterSelectedAsync"
+                disabled="@(_selected.Count == 0 || _registering)"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+            @if (_registering) { <Spinner /> <span>Registering…</span> }
+            else
+            {
+                <Icon Name="plus" Class="w-4 h-4" />
+                <span>Register @(_selected.Count > 0 ? $"{_selected.Count} selected" : "selected")</span>
+            }
+        </button>
+    </Footer>
+</Modal>
+
+@code {
+    [Parameter] public bool Open { get; set; }
+    [Parameter] public EventCallback<bool> OpenChanged { get; set; }
+    [Parameter] public IReadOnlyCollection<string> ExistingNames { get; set; } = Array.Empty<string>();
+    [Parameter] public EventCallback<IReadOnlyList<Repository>> OnRegister { get; set; }
+
+    private IReadOnlyList<GitHubRepo>? _repos;
+    private readonly HashSet<string> _selected = new(StringComparer.Ordinal);
+    private string _query = string.Empty;
+    private string? _ownerFilter;
+    private bool _useSsh;
+    private bool _loading;
+    private bool _registering;
+    private string? _error;
+    private bool _wasOpen;
+
+    private IReadOnlyList<string> _owners =>
+        _repos is null
+            ? Array.Empty<string>()
+            : _repos.Select(r => r.OwnerLogin)
+                    .Where(o => !string.IsNullOrEmpty(o))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(o => o, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (Open && !_wasOpen)
+        {
+            _wasOpen = true;
+            await LoadAsync();
+        }
+        else if (!Open && _wasOpen)
+        {
+            _wasOpen = false;
+            _selected.Clear();
+            _query = string.Empty;
+            _ownerFilter = null;
+            _error = null;
+        }
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true;
+        _error = null;
+        _repos = null;
+        try
+        {
+            _repos = await GitHub.ListAccessibleReposAsync();
+        }
+        catch (InvalidOperationException ex)
+        {
+            _error = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            _error = $"Failed to fetch repos: {ex.Message}";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private IReadOnlyList<GitHubRepo> _filtered
+    {
+        get
+        {
+            if (_repos is null) return Array.Empty<GitHubRepo>();
+            IEnumerable<GitHubRepo> filtered = _repos;
+            if (!string.IsNullOrEmpty(_ownerFilter))
+            {
+                filtered = filtered.Where(r => string.Equals(r.OwnerLogin, _ownerFilter, StringComparison.OrdinalIgnoreCase));
+            }
+            if (!string.IsNullOrWhiteSpace(_query))
+            {
+                var q = _query.Trim();
+                filtered = filtered.Where(r =>
+                    r.FullName.Contains(q, StringComparison.OrdinalIgnoreCase)
+                    || (r.Description?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false));
+            }
+            return filtered.ToList();
+        }
+    }
+
+    private void ToggleSelected(GitHubRepo repo, bool selected)
+    {
+        if (selected) _selected.Add(repo.FullName);
+        else _selected.Remove(repo.FullName);
+    }
+
+    private async Task RegisterSelectedAsync()
+    {
+        if (_selected.Count == 0 || _repos is null) return;
+        _registering = true;
+        try
+        {
+            var toRegister = _repos
+                .Where(r => _selected.Contains(r.FullName))
+                .Select(r => new Repository
+                {
+                    Name = r.Name,
+                    CloneUrl = _useSsh ? r.SshUrl : r.CloneUrl,
+                    DefaultBranch = r.DefaultBranch
+                })
+                .ToList();
+            await OnRegister.InvokeAsync(toRegister);
+        }
+        finally
+        {
+            _registering = false;
+        }
+    }
+
+    private async Task Cancel()
+    {
+        await OpenChanged.InvokeAsync(false);
+    }
+
+    private string RowClass(bool alreadyRegistered, bool selected)
+    {
+        var b = "flex items-start gap-3 px-4 py-3 cursor-pointer transition-colors";
+        if (alreadyRegistered) return b + " bg-zinc-950/40 cursor-not-allowed";
+        return selected
+            ? b + " bg-emerald-500/5 hover:bg-emerald-500/10"
+            : b + " hover:bg-zinc-900/60";
+    }
+
+    private string TabClass(bool active) => active
+        ? "px-3 py-1 rounded bg-zinc-800 text-zinc-100 font-medium"
+        : "px-3 py-1 rounded text-zinc-500 hover:text-zinc-300";
+
+    private string ChipClass(bool active) => active
+        ? "inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/40"
+        : "inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium bg-zinc-900 text-zinc-400 border border-zinc-800 hover:border-zinc-700 hover:text-zinc-200 transition-colors";
+
+    private static string FormatRelative(DateTimeOffset when)
+    {
+        var delta = DateTimeOffset.UtcNow - when;
+        if (delta.TotalDays >= 365) return $"{(int)(delta.TotalDays / 365)}y ago";
+        if (delta.TotalDays >= 30) return $"{(int)(delta.TotalDays / 30)}mo ago";
+        if (delta.TotalDays >= 1) return $"{(int)delta.TotalDays}d ago";
+        if (delta.TotalHours >= 1) return $"{(int)delta.TotalHours}h ago";
+        if (delta.TotalMinutes >= 1) return $"{(int)delta.TotalMinutes}m ago";
+        return "just now";
+    }
+}

@@ -1,0 +1,31 @@
+@{
+    var items = new (string Href, string Icon, string Label, NavLinkMatch Match)[]
+    {
+        ("/",           "home",      "Home",         NavLinkMatch.All),
+        ("/boards",     "dashboard", "Boards",       NavLinkMatch.Prefix),
+        ("/tickets",    "ticket",    "Tickets",      NavLinkMatch.Prefix),
+        ("/repos",      "folder",    "Repositories", NavLinkMatch.Prefix),
+        ("/workspaces", "terminal",  "Workspaces",   NavLinkMatch.Prefix),
+    };
+}
+
+<nav class="px-3 space-y-0.5">
+    @foreach (var item in items)
+    {
+        <NavLink class="group flex items-center gap-3 px-3 py-2 rounded-md text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 transition-colors"
+                 ActiveClass="!text-zinc-100 !bg-zinc-800/70"
+                 href="@item.Href" Match="@item.Match">
+            <Icon Name="@item.Icon" Class="w-[18px] h-[18px] text-zinc-500 group-hover:text-zinc-300" />
+            <span>@item.Label</span>
+        </NavLink>
+    }
+
+    <div class="pt-3 mt-3 border-t border-zinc-800/80"></div>
+
+    <NavLink class="group flex items-center gap-3 px-3 py-2 rounded-md text-sm text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800/50 transition-colors"
+             ActiveClass="!text-zinc-100 !bg-zinc-800/70"
+             href="/settings" Match="NavLinkMatch.Prefix">
+        <Icon Name="settings" Class="w-[18px] h-[18px] text-zinc-500 group-hover:text-zinc-300" />
+        <span>Settings</span>
+    </NavLink>
+</nav>
