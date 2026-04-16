@@ -98,6 +98,13 @@ public class ApiClient
         await EnsureSuccessAsync(response, ct);
     }
 
+    public async Task<IReadOnlyList<PullRequestResult>> SubmitWorkspaceAsync(string ticketKey, CancellationToken ct = default)
+    {
+        using var response = await _http.PostAsync($"api/workspaces/{Uri.EscapeDataString(ticketKey)}/submit", content: null, ct);
+        await EnsureSuccessAsync(response, ct);
+        return (await response.Content.ReadFromJsonAsync<IReadOnlyList<PullRequestResult>>(_json, ct))!;
+    }
+
     public async Task SaveJiraConnectionAsync(string baseUrl, string email, string apiToken, CancellationToken ct = default)
     {
         using var response = await _http.PostAsJsonAsync("api/jira/connection",

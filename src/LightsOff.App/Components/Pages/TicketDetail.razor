@@ -127,7 +127,40 @@ else
                     }
                 </dl>
 
+                @if (_submitResults is { Count: > 0 })
+                {
+                    <div class="rounded-lg border border-zinc-800 bg-zinc-950/40 divide-y divide-zinc-800/60 mb-4 overflow-hidden">
+                        @foreach (var result in _submitResults)
+                        {
+                            <div class="px-4 py-2.5 flex items-center gap-3 text-sm">
+                                @if (result.Url is not null)
+                                {
+                                    <Icon Name="check" Class="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                                    <span class="font-medium">@result.RepositoryName</span>
+                                    <span class="text-zinc-600">·</span>
+                                    <a href="@result.Url" target="_blank" rel="noopener"
+                                       class="text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-1 truncate">
+                                        @result.Url <Icon Name="external" Class="w-3.5 h-3.5" />
+                                    </a>
+                                }
+                                else
+                                {
+                                    <Icon Name="alert" Class="w-4 h-4 text-red-400 flex-shrink-0" />
+                                    <span class="font-medium">@result.RepositoryName</span>
+                                    <span class="text-zinc-600">·</span>
+                                    <span class="text-red-300 text-xs truncate">@result.Error</span>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+
                 <div class="flex gap-2 pt-2 border-t border-zinc-800/80">
+                    <button type="button" @onclick="SubmitWorkspaceAsync" disabled="@_submitting"
+                            class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                        @if (_submitting) { <Spinner /> <span>Pushing &amp; opening PRs…</span> }
+                        else { <Icon Name="external" Class="w-4 h-4" /> <span>Submit PRs</span> }
+                    </button>
                     <a href="/workspaces"
                        class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-sm font-medium transition-colors">
                         <Icon Name="terminal" Class="w-4 h-4" />
@@ -290,6 +323,8 @@ else
 
     private bool _creating;
     private bool _destroying;
+    private bool _submitting;
+    private IReadOnlyList<PullRequestResult>? _submitResults;
     private string? _createError;
 
     private IReadOnlyList<GitHubRepo> _filteredRepos
@@ -422,6 +457,39 @@ else
         finally
         {
             _creating = false;
+        }
+    }
+
+    private async Task SubmitWorkspaceAsync()
+    {
+        if (_existingWorkspace is null) return;
+        _submitting = true;
+        try
+        {
+            var results = await Workspaces.SubmitAsync(_existingWorkspace.TicketKey);
+            _submitResults = results;
+            var opened = results.Count(r => r.Url is not null);
+            var failed = results.Count(r => r.Url is null);
+            if (failed == 0)
+            {
+                Toasts.Success($"Opened {opened} pull request{(opened == 1 ? "" : "s")}.");
+            }
+            else if (opened == 0)
+            {
+                Toasts.Error($"All {failed} submit(s) failed.");
+            }
+            else
+            {
+                Toasts.Warning($"Opened {opened}, {failed} failed.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            _submitting = false;
         }
     }
 

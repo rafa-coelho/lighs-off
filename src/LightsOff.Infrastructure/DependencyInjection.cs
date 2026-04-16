@@ -41,6 +41,7 @@ public static class DependencyInjection
         services.AddScoped<IGitService, LibGit2Service>();
         services.AddSingleton<IDockerService, DockerService>();
         services.AddScoped<IRepositoryRegistry, RepositoryRegistry>();
+        services.AddSingleton<Workspaces.RepoConfigLoader>();
         services.AddScoped<IWorkspaceManager, WorkspaceManager>();
 
         return services;

@@ -2,18 +2,24 @@ namespace LightsOff.Core.Abstractions;
 
 public record WorkspaceBind(string HostPath, string ContainerPath);
 
+public record ContainerSpec(
+    string Name,
+    string Image,
+    IReadOnlyList<WorkspaceBind> Binds,
+    IReadOnlyList<string>? Ports = null,
+    IReadOnlyDictionary<string, string>? Env = null,
+    string WorkingDir = "/workspace");
+
 public interface IDockerService
 {
-    Task<string> CreateWorkspaceContainerAsync(
-        string containerName,
-        string image,
-        IReadOnlyList<WorkspaceBind> binds,
-        string workingDir = "/workspace",
-        CancellationToken ct = default);
+    Task<string> CreateWorkspaceContainerAsync(ContainerSpec spec, CancellationToken ct = default);
 
     Task StartAsync(string containerId, CancellationToken ct = default);
     Task StopAsync(string containerId, CancellationToken ct = default);
     Task RemoveAsync(string containerId, CancellationToken ct = default);
     Task<string?> GetStatusAsync(string containerId, CancellationToken ct = default);
     Task<bool> IsDockerAvailableAsync(CancellationToken ct = default);
+
+    /// <summary>Run a shell command inside the container. Returns the exit code.</summary>
+    Task<int> ExecAsync(string containerId, IReadOnlyList<string> command, CancellationToken ct = default);
 }

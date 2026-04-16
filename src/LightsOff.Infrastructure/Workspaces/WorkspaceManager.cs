@@ -14,7 +14,10 @@ public class WorkspaceManager : IWorkspaceManager
     private readonly AppDbContext _db;
     private readonly IRepositoryRegistry _repos;
     private readonly IGitService _git;
+    private readonly IGitHubClient _github;
     private readonly IDockerService _docker;
+    private readonly IJiraConnectionProvider _jiraConn;
+    private readonly RepoConfigLoader _configLoader;
     private readonly LightsOffOptions _options;
     private readonly ILogger<WorkspaceManager> _logger;
 
@@ -22,14 +25,20 @@ public class WorkspaceManager : IWorkspaceManager
         AppDbContext db,
         IRepositoryRegistry repos,
         IGitService git,
+        IGitHubClient github,
         IDockerService docker,
+        IJiraConnectionProvider jiraConn,
+        RepoConfigLoader configLoader,
         IOptions<LightsOffOptions> options,
         ILogger<WorkspaceManager> logger)
     {
         _db = db;
         _repos = repos;
         _git = git;
+        _github = github;
         _docker = docker;
+        _jiraConn = jiraConn;
+        _configLoader = configLoader;
         _options = options.Value;
         _logger = logger;
     }
@@ -58,6 +67,7 @@ public class WorkspaceManager : IWorkspaceManager
         var links = new List<TicketRepositoryLink>();
         var binds = new List<WorkspaceBind>();
         var resolvedRepos = new List<Repository>();
+        var repoConfigs = new List<(string Name, RepoConfig? Config)>();
         Repository? firstRepo = null;
         foreach (var repoName in request.RepositoryNames)
         {
@@ -79,6 +89,9 @@ public class WorkspaceManager : IWorkspaceManager
             // Bind mount the real repo directory into the container at /workspace/<name>
             // so it's directly browseable + editable from inside.
             binds.Add(new WorkspaceBind(repoDestination, $"/workspace/{repo.Name}"));
+
+            // Optional per-repo config — affects image choice, ports, env, post-create steps.
+            repoConfigs.Add((repo.Name, _configLoader.TryLoad(repoDestination)));
 
             links.Add(new TicketRepositoryLink
             {
@@ -102,28 +115,66 @@ public class WorkspaceManager : IWorkspaceManager
         {
             if (await _docker.IsDockerAvailableAsync(ct).ConfigureAwait(false))
             {
-                var image = firstRepo?.Image ?? _options.DefaultContainerImage;
-
-                // Warn if linked repos disagree on image override — we pick the first one.
-                var distinctImages = resolvedRepos
+                // Image precedence: .lightsoff.yaml > repo.Image override > global default. First-wins on conflict.
+                var yamlImages = repoConfigs
+                    .Select(rc => rc.Config?.Image)
+                    .Where(i => !string.IsNullOrWhiteSpace(i))
+                    .ToList();
+                var repoImages = resolvedRepos
                     .Select(r => r.Image)
                     .Where(i => !string.IsNullOrWhiteSpace(i))
-                    .Distinct(StringComparer.Ordinal)
                     .ToList();
-                if (distinctImages.Count > 1)
+                var image = yamlImages.FirstOrDefault()
+                         ?? repoImages.FirstOrDefault()
+                         ?? _options.DefaultContainerImage;
+
+                var allImages = yamlImages.Concat(repoImages).Distinct(StringComparer.Ordinal).ToList();
+                if (allImages.Count > 1)
                 {
                     _logger.LogWarning(
-                        "Repositories linked to {TicketKey} disagree on container image ({Images}); using first: {Chosen}",
-                        request.TicketKey, string.Join(", ", distinctImages), image);
+                        "Repositories linked to {TicketKey} disagree on container image ({Images}); using: {Chosen}",
+                        request.TicketKey, string.Join(", ", allImages), image);
+                }
+
+                // Merge ports + env from every repo's .lightsoff.yaml.
+                var ports = repoConfigs.SelectMany(rc => rc.Config?.Ports ?? Enumerable.Empty<string>()).ToList();
+                var env = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var (_, config) in repoConfigs)
+                {
+                    if (config?.Env is null) continue;
+                    foreach (var (k, v) in config.Env)
+                    {
+                        env[k] = v;
+                    }
                 }
 
                 var containerName = $"lightsoff-{request.TicketKey.ToLowerInvariant()}";
-                var containerId = await _docker.CreateWorkspaceContainerAsync(
-                    containerName, image, binds, "/workspace", ct).ConfigureAwait(false);
+                var spec = new ContainerSpec(containerName, image, binds, ports, env);
+                var containerId = await _docker.CreateWorkspaceContainerAsync(spec, ct).ConfigureAwait(false);
                 await _docker.StartAsync(containerId, ct).ConfigureAwait(false);
                 workspace.ContainerId = containerId;
                 workspace.ContainerName = containerName;
                 workspace.Status = WorkspaceStatus.Running;
+
+                // Post-create commands run inside the container, scoped to each repo's working dir.
+                foreach (var (name, config) in repoConfigs)
+                {
+                    if (config?.PostCreateCommands is not { Count: > 0 }) continue;
+                    foreach (var cmd in config.PostCreateCommands)
+                    {
+                        _logger.LogInformation("Post-create ({Repo}): {Cmd}", name, cmd);
+                        try
+                        {
+                            await _docker.ExecAsync(containerId,
+                                new[] { "sh", "-c", $"cd /workspace/{name} && {cmd}" },
+                                ct).ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogWarning(ex, "Post-create step failed for {Repo}: {Cmd}", name, cmd);
+                        }
+                    }
+                }
             }
             else
             {
@@ -220,6 +271,82 @@ public class WorkspaceManager : IWorkspaceManager
 
         _db.Workspaces.Remove(workspace);
         await _db.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<PullRequestResult>> SubmitAsync(string ticketKey, CancellationToken ct = default)
+    {
+        var workspace = await _db.Workspaces.Include(w => w.Links)
+            .FirstOrDefaultAsync(w => w.TicketKey == ticketKey, ct).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Workspace {ticketKey} not found.");
+
+        if (workspace.Links.Count == 0)
+        {
+            throw new InvalidOperationException($"Workspace {ticketKey} has no linked repositories.");
+        }
+
+        var jira = await _jiraConn.GetAsync(ct).ConfigureAwait(false);
+        var ticketUrl = jira is null
+            ? null
+            : $"{jira.BaseUrl.TrimEnd('/')}/browse/{ticketKey}";
+
+        var title = $"{ticketKey}: {workspace.TicketSummary}";
+        var body = ticketUrl is null
+            ? $"Resolves {ticketKey}\n\n_Created via lights-off_"
+            : $"Resolves {ticketKey}\n\n{ticketUrl}\n\n_Created via lights-off_";
+
+        var results = new List<PullRequestResult>();
+        foreach (var link in workspace.Links)
+        {
+            try
+            {
+                var repo = await _repos.GetAsync(link.RepositoryName, ct).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException(
+                        $"Repository '{link.RepositoryName}' was unregistered after workspace creation.");
+
+                var repoPath = Path.Combine(_options.ReposRoot, link.RepositoryName);
+
+                await _git.PushBranchAsync(repoPath, link.BranchName, ct).ConfigureAwait(false);
+
+                var (owner, name) = ParseOwnerRepo(repo.CloneUrl);
+                var prUrl = await _github.CreatePullRequestAsync(
+                    owner, name, link.BranchName, repo.DefaultBranch, title, body, ct).ConfigureAwait(false);
+
+                _logger.LogInformation("Opened PR {Url} for {Repo} on {Branch}", prUrl, link.RepositoryName, link.BranchName);
+                results.Add(new PullRequestResult(link.RepositoryName, link.BranchName, prUrl, null));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Submit failed for {Repo}", link.RepositoryName);
+                results.Add(new PullRequestResult(link.RepositoryName, link.BranchName, null, ex.Message));
+            }
+        }
+
+        return results;
+    }
+
+    private static (string owner, string name) ParseOwnerRepo(string cloneUrl)
+    {
+        // Accept https://github.com/owner/repo(.git) and git@github.com:owner/repo(.git)
+        var normalized = cloneUrl.Trim();
+        if (normalized.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = "https://github.com/" + normalized["git@github.com:".Length..];
+        }
+        if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri))
+        {
+            throw new FormatException($"Can't parse owner/repo from clone URL: {cloneUrl}");
+        }
+        var path = uri.AbsolutePath.TrimStart('/');
+        if (path.EndsWith(".git", StringComparison.OrdinalIgnoreCase))
+        {
+            path = path[..^4];
+        }
+        var parts = path.Split('/', 2);
+        if (parts.Length < 2)
+        {
+            throw new FormatException($"Clone URL doesn't look like owner/repo: {cloneUrl}");
+        }
+        return (parts[0], parts[1]);
     }
 
     private static void EnsureSymlink(string linkPath, string target)

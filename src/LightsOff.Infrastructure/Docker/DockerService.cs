@@ -3,6 +3,7 @@ using Docker.DotNet;
 using Docker.DotNet.Models;
 using LightsOff.Core.Abstractions;
 using Microsoft.Extensions.Logging;
+using ContainerSpec = LightsOff.Core.Abstractions.ContainerSpec;
 
 namespace LightsOff.Infrastructure.Docker;
 
@@ -17,40 +18,113 @@ public class DockerService : IDockerService, IAsyncDisposable
         _client = new Lazy<DockerClient>(CreateClient);
     }
 
-    public async Task<string> CreateWorkspaceContainerAsync(
-        string containerName,
-        string image,
-        IReadOnlyList<WorkspaceBind> binds,
-        string workingDir = "/workspace",
-        CancellationToken ct = default)
+    public async Task<string> CreateWorkspaceContainerAsync(ContainerSpec spec, CancellationToken ct = default)
     {
-        await EnsureImagePulledAsync(image, ct).ConfigureAwait(false);
+        await EnsureImagePulledAsync(spec.Image, ct).ConfigureAwait(false);
 
-        var existing = await TryFindContainerAsync(containerName, ct).ConfigureAwait(false);
+        var existing = await TryFindContainerAsync(spec.Name, ct).ConfigureAwait(false);
         if (existing is not null)
         {
-            _logger.LogDebug("Container {Name} already exists ({Id})", containerName, existing.ID);
+            _logger.LogDebug("Container {Name} already exists ({Id})", spec.Name, existing.ID);
             return existing.ID;
         }
 
+        var (exposed, portBindings) = BuildPortMaps(spec.Ports);
+
         var parameters = new CreateContainerParameters
         {
-            Image = image,
-            Name = containerName,
+            Image = spec.Image,
+            Name = spec.Name,
             Cmd = new List<string> { "sleep", "infinity" },
             Labels = new Dictionary<string, string> { ["lightsoff.managed"] = "true" },
+            ExposedPorts = exposed,
+            Env = spec.Env?.Select(kv => $"{kv.Key}={kv.Value}").ToList(),
             HostConfig = new HostConfig
             {
-                Binds = binds.Select(b => $"{b.HostPath}:{b.ContainerPath}").ToList(),
+                Binds = spec.Binds.Select(b => $"{b.HostPath}:{b.ContainerPath}").ToList(),
+                PortBindings = portBindings,
                 AutoRemove = false
             },
-            WorkingDir = workingDir
+            WorkingDir = spec.WorkingDir
         };
 
         var response = await _client.Value.Containers.CreateContainerAsync(parameters, ct).ConfigureAwait(false);
-        _logger.LogInformation("Created container {Name} with id {Id} and {BindCount} bind(s)",
-            containerName, response.ID, binds.Count);
+        _logger.LogInformation("Created container {Name} ({Id}) binds={BindCount} ports={PortCount} env={EnvCount}",
+            spec.Name, response.ID, spec.Binds.Count, spec.Ports?.Count ?? 0, spec.Env?.Count ?? 0);
         return response.ID;
+    }
+
+    public async Task<int> ExecAsync(string containerId, IReadOnlyList<string> command, CancellationToken ct = default)
+    {
+        var exec = await _client.Value.Exec.ExecCreateContainerAsync(containerId, new ContainerExecCreateParameters
+        {
+            Cmd = command.ToList(),
+            AttachStdout = true,
+            AttachStderr = true
+        }, ct).ConfigureAwait(false);
+
+        using var stream = await _client.Value.Exec.StartAndAttachContainerExecAsync(exec.ID, tty: false, ct)
+            .ConfigureAwait(false);
+        var (stdout, stderr) = await stream.ReadOutputToEndAsync(ct).ConfigureAwait(false);
+
+        var inspect = await _client.Value.Exec.InspectContainerExecAsync(exec.ID, ct).ConfigureAwait(false);
+        if (inspect.ExitCode != 0)
+        {
+            _logger.LogWarning("Exec in {Id} exit={Exit} stderr={Stderr}", containerId, inspect.ExitCode,
+                stderr.Length > 500 ? stderr[..500] + "…" : stderr);
+        }
+        else if (!string.IsNullOrWhiteSpace(stdout))
+        {
+            _logger.LogDebug("Exec in {Id} stdout: {Stdout}", containerId,
+                stdout.Length > 500 ? stdout[..500] + "…" : stdout);
+        }
+        return (int)inspect.ExitCode;
+    }
+
+    private static (Dictionary<string, EmptyStruct> Exposed, Dictionary<string, IList<PortBinding>> Bindings)
+        BuildPortMaps(IReadOnlyList<string>? ports)
+    {
+        var exposed = new Dictionary<string, EmptyStruct>();
+        var bindings = new Dictionary<string, IList<PortBinding>>();
+        if (ports is null || ports.Count == 0)
+        {
+            return (exposed, bindings);
+        }
+
+        foreach (var raw in ports)
+        {
+            // Accept "3000", "3000:3000", "127.0.0.1:3000:3000"
+            var parts = raw.Split(':', StringSplitOptions.TrimEntries);
+            string host, container;
+            string bindIp = "0.0.0.0";
+            switch (parts.Length)
+            {
+                case 1:
+                    host = container = parts[0];
+                    break;
+                case 2:
+                    host = parts[0];
+                    container = parts[1];
+                    break;
+                case 3:
+                    bindIp = parts[0];
+                    host = parts[1];
+                    container = parts[2];
+                    break;
+                default:
+                    continue;
+            }
+
+            var key = $"{container}/tcp";
+            exposed[key] = default;
+            if (!bindings.ContainsKey(key))
+            {
+                bindings[key] = new List<PortBinding>();
+            }
+            bindings[key].Add(new PortBinding { HostIP = bindIp, HostPort = host });
+        }
+
+        return (exposed, bindings);
     }
 
     public async Task StartAsync(string containerId, CancellationToken ct = default)

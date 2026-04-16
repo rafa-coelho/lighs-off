@@ -93,6 +93,37 @@ public class LibGit2Service : IGitService
         }, ct);
     }
 
+    public async Task PushBranchAsync(string repoPath, string branchName, CancellationToken ct = default)
+    {
+        var credentials = await GetCredentialsAsync(ct).ConfigureAwait(false)
+            ?? throw new InvalidOperationException(
+                "GitHub PAT is required to push. Add one in Settings (or configure another credential).");
+
+        await Task.Run(() =>
+        {
+            using var git = new GitRepo(repoPath);
+            var branch = git.Branches[branchName]
+                ?? throw new InvalidOperationException($"Branch '{branchName}' not found in {repoPath}.");
+
+            var remote = git.Network.Remotes["origin"]
+                ?? throw new InvalidOperationException("Remote 'origin' not configured.");
+
+            git.Branches.Update(branch, b =>
+            {
+                b.Remote = remote.Name;
+                b.UpstreamBranch = branch.CanonicalName;
+            });
+
+            var options = new PushOptions
+            {
+                CredentialsProvider = (_, _, _) => credentials
+            };
+            git.Network.Push(branch, options);
+        }, ct).ConfigureAwait(false);
+
+        _logger.LogInformation("Pushed {Branch} from {RepoPath}", branchName, repoPath);
+    }
+
     private static bool IsGitRepo(string path)
     {
         if (!Directory.Exists(path))

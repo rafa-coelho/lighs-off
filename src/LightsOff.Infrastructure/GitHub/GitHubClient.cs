@@ -180,6 +180,77 @@ public class GitHubClient : IGitHubClient
         }
     }
 
+    public async Task<string> CreatePullRequestAsync(
+        string owner,
+        string repo,
+        string headBranch,
+        string baseBranch,
+        string title,
+        string body,
+        CancellationToken ct = default)
+    {
+        var pat = await _secrets.GetAsync(SecretKeys.GitHubPat, ct).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("GitHub PAT is not configured. Open Settings to add one.");
+
+        using var client = CreateClient(pat);
+        var url = $"repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/pulls";
+        var payload = new
+        {
+            title,
+            body,
+            head = headBranch,
+            @base = baseBranch
+        };
+
+        using var response = await client.PostAsJsonAsync(url, payload, ct).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            var errorBody = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            var detail = TryExtractMessage(errorBody) ?? errorBody;
+            throw new InvalidOperationException(
+                $"GitHub refused PR creation for {owner}/{repo} ({(int)response.StatusCode}): {detail}");
+        }
+
+        var pr = await response.Content.ReadFromJsonAsync<PullRequestDto>(cancellationToken: ct).ConfigureAwait(false);
+        return pr?.HtmlUrl
+            ?? throw new InvalidOperationException("GitHub returned no html_url for the new PR.");
+    }
+
+    private static string? TryExtractMessage(string body)
+    {
+        try
+        {
+            var doc = System.Text.Json.JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("message", out var msg))
+            {
+                var baseMsg = msg.GetString();
+                if (doc.RootElement.TryGetProperty("errors", out var errs) && errs.ValueKind == System.Text.Json.JsonValueKind.Array)
+                {
+                    var details = errs.EnumerateArray()
+                        .Select(e => e.TryGetProperty("message", out var m) ? m.GetString() : null)
+                        .Where(s => !string.IsNullOrEmpty(s));
+                    var joined = string.Join("; ", details);
+                    if (!string.IsNullOrEmpty(joined))
+                    {
+                        return $"{baseMsg} — {joined}";
+                    }
+                }
+                return baseMsg;
+            }
+        }
+        catch
+        {
+            // fall through
+        }
+        return null;
+    }
+
+    private sealed class PullRequestDto
+    {
+        [JsonPropertyName("html_url")] public string? HtmlUrl { get; set; }
+        [JsonPropertyName("number")] public int Number { get; set; }
+    }
+
     private async Task<List<RepoDto>> FetchReposAsync(HttpClient client, string firstUrl, bool isSearch, CancellationToken ct)
     {
         var all = new List<RepoDto>();

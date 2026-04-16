@@ -251,6 +251,34 @@ static Command BuildWorkspaceCommand(Option<string> apiOption)
         Console.WriteLine($"Stopped {parseResult.GetValue(ticketArg)}.");
     }));
 
+    var submit = new Command("submit", "Push branches and open pull requests for every linked repo") { ticketArg };
+    submit.SetAction(Run(async (parseResult, ct) =>
+    {
+        var api = ApiClient.Create(parseResult.GetValue(apiOption)!);
+        var results = await api.SubmitWorkspaceAsync(parseResult.GetValue(ticketArg)!, ct);
+        var opened = 0;
+        var failed = 0;
+        foreach (var r in results)
+        {
+            if (r.Url is not null)
+            {
+                Console.WriteLine($"  ✓ {r.RepositoryName}  {r.Url}");
+                opened++;
+            }
+            else
+            {
+                Console.WriteLine($"  ✗ {r.RepositoryName}  {r.Error}");
+                failed++;
+            }
+        }
+        Console.WriteLine();
+        Console.WriteLine($"{opened} opened, {failed} failed.");
+        if (failed > 0 && opened == 0)
+        {
+            throw new ApiException(500, "All submits failed.");
+        }
+    }));
+
     var attach = new Command("attach", "Print the docker exec command for a workspace") { ticketArg };
     attach.SetAction(Run(async (parseResult, ct) =>
     {
@@ -269,6 +297,7 @@ static Command BuildWorkspaceCommand(Option<string> apiOption)
     workspace.Subcommands.Add(start);
     workspace.Subcommands.Add(stop);
     workspace.Subcommands.Add(attach);
+    workspace.Subcommands.Add(submit);
     workspace.Subcommands.Add(destroy);
     return workspace;
 }

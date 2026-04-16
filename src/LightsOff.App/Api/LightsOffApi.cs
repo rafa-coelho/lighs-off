@@ -276,6 +276,9 @@ public static class LightsOffApi
             return Results.NoContent();
         });
 
+        api.MapPost("/workspaces/{key}/submit", async (string key, IWorkspaceManager manager, CancellationToken ct)
+            => Results.Ok(await manager.SubmitAsync(key, ct)));
+
         api.MapPost("/workspaces/{key}/stop", async (string key, IWorkspaceManager manager, CancellationToken ct) =>
         {
             await manager.StopAsync(key, ct);
