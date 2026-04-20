@@ -9,6 +9,7 @@ public interface IGitService
     Task CreateAndCheckoutBranchAsync(string repoPath, string branchName, CancellationToken ct = default);
     Task PushBranchAsync(string repoPath, string branchName, CancellationToken ct = default);
     Task<string> GetDiffAsync(string repoPath, string baseBranch, string headBranch, CancellationToken ct = default);
+    Task<bool> HasUncommittedChangesAsync(string repoPath, CancellationToken ct = default);
 
     /// <summary>
     /// Returns the number of new commits on origin/{defaultBranch} not authored by <paramref name="excludeAuthor"/>.

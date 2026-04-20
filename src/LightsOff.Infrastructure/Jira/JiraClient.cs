@@ -83,7 +83,7 @@ public class JiraClient : IJiraClient
         using var client = await CreateConfiguredClientAsync(ct).ConfigureAwait(false);
         try
         {
-            var issue = await client.GetFromJsonAsync<IssueDto>($"/rest/api/3/issue/{Uri.EscapeDataString(key)}", ct)
+            var issue = await client.GetFromJsonAsync<IssueDto>($"/rest/api/3/issue/{Uri.EscapeDataString(key)}?expand=renderedFields", ct)
                 .ConfigureAwait(false);
             if (issue is null)
             {

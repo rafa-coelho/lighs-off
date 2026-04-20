@@ -95,15 +95,24 @@ else
                                         else { <Icon Name="stop" Class="w-4 h-4" /> }
                                     </button>
                                 }
-                                else if (w.Status == WorkspaceStatus.Stopped || w.Status == WorkspaceStatus.Created)
+                                else if (w.Status is WorkspaceStatus.Stopped or WorkspaceStatus.Created)
                                 {
-                                    <button type="button" @onclick="() => StartAsync(w)"
-                                            disabled="@(busy || string.IsNullOrEmpty(w.ContainerId))"
-                                            class="p-1.5 rounded-md text-zinc-400 hover:text-emerald-300 hover:bg-zinc-800 transition-colors disabled:opacity-40"
-                                            title="@(string.IsNullOrEmpty(w.ContainerId) ? "No container for this workspace" : "Start container")">
-                                        @if (busy) { <Spinner Class="w-4 h-4" /> }
-                                        else { <Icon Name="play" Class="w-4 h-4" /> }
-                                    </button>
+                                    @if (!string.IsNullOrEmpty(w.ContainerId))
+                                    {
+                                        <button type="button" @onclick="() => StartAsync(w)"
+                                                disabled="@busy"
+                                                class="p-1.5 rounded-md text-zinc-400 hover:text-emerald-300 hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                                                title="Start container">
+                                            @if (busy) { <Spinner Class="w-4 h-4" /> }
+                                            else { <Icon Name="play" Class="w-4 h-4" /> }
+                                        </button>
+                                    }
+                                    else
+                                    {
+                                        <span class="p-1.5 text-zinc-600 text-[10px]" title="No container — destroy and recreate with Docker running">
+                                            no container
+                                        </span>
+                                    }
                                 }
                                 <button type="button" @onclick="() => DestroyAsync(w)"
                                         disabled="@busy"

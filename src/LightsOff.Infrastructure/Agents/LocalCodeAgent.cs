@@ -464,7 +464,9 @@ public partial class LocalCodeAgent : ICodeAgent
     private static bool ContainsChecklist(string text) =>
         text.Contains("- [ ]", StringComparison.Ordinal) ||
         text.Contains("- [x]", StringComparison.OrdinalIgnoreCase) ||
-        text.Contains("* [ ]", StringComparison.Ordinal);
+        text.Contains("* [ ]", StringComparison.Ordinal) ||
+        text.Contains("[ ]", StringComparison.Ordinal) ||
+        text.Contains("[x]", StringComparison.OrdinalIgnoreCase);
 
     private static List<TicketTask> ExtractTasks(Ticket ticket)
     {
@@ -484,7 +486,11 @@ public partial class LocalCodeAgent : ICodeAgent
         var text = (ticket.AcceptanceCriteria ?? "") + "\n" + (ticket.Description ?? "");
         foreach (Match match in ChecklistPattern().Matches(text))
         {
-            tasks.Add(new TicketTask(order++, match.Groups[1].Value.Trim(), true));
+            var taskText = StripHtml(match.Groups[1].Value.Trim());
+            if (!string.IsNullOrWhiteSpace(taskText))
+            {
+                tasks.Add(new TicketTask(order++, taskText, true));
+            }
         }
 
         // If no tasks found, create one from the summary
@@ -495,6 +501,9 @@ public partial class LocalCodeAgent : ICodeAgent
 
         return tasks;
     }
+
+    private static string StripHtml(string html) =>
+        Regex.Replace(html, "<[^>]+>", "").Trim();
 
     private static List<RelevantFile> FindRelevantFiles(Ticket ticket, IReadOnlyList<RepoContext> contexts)
     {
@@ -548,7 +557,7 @@ public partial class LocalCodeAgent : ICodeAgent
     [GeneratedRegex(@"\b(?:should work|properly|as expected|correctly|ASAP|as needed)\b", RegexOptions.IgnoreCase)]
     private static partial Regex VaguePattern();
 
-    [GeneratedRegex(@"[-*]\s*\[[ x]\]\s*(.+)", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"(?:[-*]\s*)?\[[ x]\]\s*(.+)", RegexOptions.IgnoreCase)]
     private static partial Regex ChecklistPattern();
 
     [GeneratedRegex(@"(?:password|secret|token|api_?key)\s*[:=]\s*[""'][^""']{4,}[""']", RegexOptions.IgnoreCase)]

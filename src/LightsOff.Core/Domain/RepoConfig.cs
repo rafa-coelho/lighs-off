@@ -9,6 +9,9 @@ public class RepoConfig
     /// <summary>Override the default container image for this repo.</summary>
     public string? Image { get; set; }
 
+    /// <summary>Primary test command (e.g. <c>npm test</c>). Used to seed the test config on first run.</summary>
+    public string? TestCommand { get; set; }
+
     /// <summary>Shell commands run inside the container after it starts (e.g. <c>npm install</c>).</summary>
     public List<string> PostCreateCommands { get; set; } = new();
 

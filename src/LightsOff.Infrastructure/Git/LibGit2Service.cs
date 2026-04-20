@@ -93,6 +93,16 @@ public class LibGit2Service : IGitService
         }, ct);
     }
 
+    public Task<bool> HasUncommittedChangesAsync(string repoPath, CancellationToken ct = default)
+    {
+        return Task.Run(() =>
+        {
+            using var git = new GitRepo(repoPath);
+            var status = git.RetrieveStatus(new LibGit2Sharp.StatusOptions());
+            return status.IsDirty;
+        }, ct);
+    }
+
     public Task<string> GetDiffAsync(string repoPath, string baseBranch, string headBranch, CancellationToken ct = default)
     {
         return Task.Run(() =>

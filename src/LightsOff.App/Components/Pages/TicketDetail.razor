@@ -1,5 +1,6 @@
 @page "/tickets/{TicketKey}"
 @using LightsOff.Core.Configuration
+@using Microsoft.EntityFrameworkCore
 @using LightsOff.Core.Utilities
 @using Microsoft.Extensions.Options
 @inject IJiraClient Jira
@@ -10,6 +11,7 @@
 @inject ICodeAgentProvider AgentProvider
 @inject IDockerService Docker
 @inject IGitService Git
+@inject LightsOff.Infrastructure.Data.AppDbContext Db
 @inject IOptions<LightsOffOptions> OptionsAccessor
 @inject ToastService Toasts
 @inject NavigationManager Nav
@@ -117,16 +119,23 @@ else
     private string _planComment = string.Empty;
 
     // Validate state
-    private TestResult? _testResult;
+    private List<RepoTestConfig> _testConfigs = new();
+    private TestSuiteResult? _suiteResult;
     private bool _runningTests;
 
     // Review state
     private CodeReview? _review;
     private bool _reviewing;
 
+    // Implement state
+    private ChangeSummary? _changeSummary;
+    private bool _checkingChanges;
+
     // Submit state
     private IReadOnlyList<PullRequestResult>? _submitResults;
     private bool _submitting;
+
+    private record ChangeSummary(bool HasChanges, int FilesChanged, int Additions, int Deletions, bool HasUncommitted);
 
     // Create workspace state
     private IReadOnlyList<GitHubRepo>? _githubRepos;
@@ -159,6 +168,7 @@ else
 
             if (_workspace is not null)
             {
+                await LoadTestConfigsAsync();
                 await RunAnalysisAsync();
             }
             else
@@ -180,6 +190,10 @@ else
     private async Task RunAnalysisAsync()
     {
         _analyzing = true;
+        _analysis = null;
+        _plan = null;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
         try
         {
             var agent = AgentProvider.GetDefaultAgent();
@@ -200,17 +214,22 @@ else
             _workflow.Analysis = _analysis;
             _workflow.Steps[PipelineStep.Analyze] = _analysis.HasErrors ? StepStatus.Warning : StepStatus.Passed;
 
-            // Auto-generate plan draft
             _plan = await agent.GeneratePlanAsync(_ticket!, _analysis, contexts);
             _workflow.Plan = _plan;
             _workflow.Steps[PipelineStep.Plan] = StepStatus.AwaitingApproval;
+
+            Toasts.Success($"Analysis complete: {_analysis.Gaps.Count} finding(s), {_analysis.Tasks.Count} task(s).");
         }
         catch (Exception ex)
         {
             _workflow.Steps[PipelineStep.Analyze] = StepStatus.Failed;
             Toasts.Error($"Analysis failed: {ex.Message}");
         }
-        finally { _analyzing = false; }
+        finally
+        {
+            _analyzing = false;
+            await InvokeAsync(StateHasChanged);
+        }
     }
 
     private RenderFragment RenderAnalyzeStep() => __builder =>
@@ -287,22 +306,41 @@ else
                 <span class="text-xs text-zinc-500">by @_plan.AgentUsed agent</span>
             </div>
 
-            <div class="text-sm text-zinc-200 mb-4 whitespace-pre-wrap border-l-2 border-zinc-700 pl-3">@_plan.Approach</div>
+            <!-- Editable approach -->
+            <div class="mb-4">
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Approach</label>
+                <textarea @bind="_plan.Approach" @bind:event="oninput" rows="3"
+                          class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors resize-y"></textarea>
+            </div>
 
-            @if (_plan.Tasks.Count > 0)
-            {
-                <h4 class="text-xs uppercase tracking-wider text-zinc-500 mb-2">Planned tasks</h4>
-                <ol class="space-y-1 mb-4">
-                    @foreach (var t in _plan.Tasks)
+            <!-- Editable tasks -->
+            <div class="mb-4">
+                <div class="flex items-center justify-between mb-2">
+                    <label class="text-xs font-medium text-zinc-400 uppercase tracking-wider">Planned tasks</label>
+                    <button type="button" @onclick="AddPlanTask"
+                            class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1">
+                        <Icon Name="plus" Class="w-3 h-3" /> Add task
+                    </button>
+                </div>
+                <div class="space-y-1.5">
+                    @for (var i = 0; i < _plan.Tasks.Count; i++)
                     {
-                        <li class="flex items-start gap-2 text-sm">
-                            <span class="text-zinc-600 font-mono text-xs mt-0.5">@t.Order.</span>
-                            <span class="text-zinc-200">@t.Description</span>
-                            @if (t.TargetFile is not null) { <code class="text-[10px] text-zinc-500">@t.TargetFile</code> }
-                        </li>
+                        var idx = i;
+                        var task = _plan.Tasks[idx];
+                        <div class="flex items-center gap-2 group">
+                            <span class="text-zinc-600 font-mono text-xs w-5 text-right flex-shrink-0">@(idx + 1).</span>
+                            <input value="@task.Description"
+                                   @onchange="@(e => UpdatePlanTask(idx, (string?)e.Value ?? ""))"
+                                   class="flex-1 bg-zinc-950 border border-zinc-800/60 rounded px-2.5 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
+                            <button type="button" @onclick="@(() => RemovePlanTask(idx))"
+                                    class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
+                                    title="Remove task">
+                                <Icon Name="x" Class="w-3.5 h-3.5" />
+                            </button>
+                        </div>
                     }
-                </ol>
-            }
+                </div>
+            </div>
 
             @if (_plan.OpenQuestions.Count > 0)
             {
@@ -377,6 +415,31 @@ else
         _planComment = string.Empty;
     }
 
+    private void AddPlanTask()
+    {
+        if (_plan is null) return;
+        var nextOrder = _plan.Tasks.Count > 0 ? _plan.Tasks.Max(t => t.Order) + 1 : 1;
+        _plan.Tasks.Add(new PlannedTask(nextOrder, "", null, null));
+    }
+
+    private void UpdatePlanTask(int index, string description)
+    {
+        if (_plan is null || index < 0 || index >= _plan.Tasks.Count) return;
+        var old = _plan.Tasks[index];
+        _plan.Tasks[index] = old with { Description = description };
+    }
+
+    private void RemovePlanTask(int index)
+    {
+        if (_plan is null || index < 0 || index >= _plan.Tasks.Count) return;
+        _plan.Tasks.RemoveAt(index);
+        // Re-number
+        for (var i = 0; i < _plan.Tasks.Count; i++)
+        {
+            _plan.Tasks[i] = _plan.Tasks[i] with { Order = i + 1 };
+        }
+    }
+
     private void RejectPlan()
     {
         if (_plan is null) return;
@@ -405,64 +468,311 @@ else
             </div>
         }
 
-        <button type="button" @onclick="@(() => { _workflow.Steps[PipelineStep.Implement] = StepStatus.Passed; _activeStep = PipelineStep.Validate; })"
-                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors">
-            <Icon Name="check" Class="w-4 h-4" /> Mark as done
-        </button>
+        @if (_changeSummary is not null)
+        {
+            <div class="rounded-lg border border-zinc-800 bg-zinc-950/40 px-4 py-3 mb-4 text-sm">
+                @if (_changeSummary.HasChanges)
+                {
+                    <div class="text-emerald-300 font-medium mb-1">Changes detected</div>
+                    @if (_changeSummary.FilesChanged > 0)
+                    {
+                        <div class="text-zinc-400 text-xs">@_changeSummary.FilesChanged file(s) committed · <span class="text-emerald-400">+@_changeSummary.Additions</span> <span class="text-red-400">-@_changeSummary.Deletions</span></div>
+                    }
+                    @if (_changeSummary.HasUncommitted)
+                    {
+                        <div class="text-amber-300 text-xs mt-1">Uncommitted changes found — remember to <code>git add + commit</code> before submitting PRs.</div>
+                    }
+                }
+                else
+                {
+                    <div class="text-amber-300 font-medium">No code changes detected.</div>
+                    <div class="text-zinc-500 text-xs mt-0.5">Edit files in the repo, then check again. Both uncommitted edits and committed diffs are detected.</div>
+                }
+            </div>
+        }
+
+        <div class="flex gap-2">
+            <button type="button" @onclick="CheckChangesAsync" disabled="@_checkingChanges"
+                    class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-sm font-medium transition-colors disabled:opacity-50">
+                @if (_checkingChanges) { <Spinner /> <span>Checking…</span> }
+                else { <Icon Name="refresh" Class="w-4 h-4" /> <span>Check for changes</span> }
+            </button>
+            <button type="button" @onclick="MarkImplementDone"
+                    disabled="@(_changeSummary is null or { HasChanges: false })"
+                    class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                <Icon Name="check" Class="w-4 h-4" /> Mark as done
+            </button>
+        </div>
     };
 
-    // ── Validate Step ───────────────────────────────────────────────────
+    private async Task CheckChangesAsync()
+    {
+        if (_workspace is null) return;
+        _checkingChanges = true;
+        _changeSummary = null;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+        try
+        {
+            var totalFiles = 0; var totalAdds = 0; var totalDels = 0;
+            var hasUncommitted = false;
+
+            foreach (var link in _workspace.Links)
+            {
+                var repo = await Registry.GetAsync(link.RepositoryName);
+                var repoPath = Path.Combine(_options.ReposRoot, link.RepositoryName);
+                if (!Directory.Exists(repoPath)) continue;
+
+                // Check uncommitted changes (modified/staged files not yet committed)
+                if (await Git.HasUncommittedChangesAsync(repoPath))
+                {
+                    hasUncommitted = true;
+                }
+
+                // Check committed diff between default branch and feature branch
+                var diff = await Git.GetDiffAsync(repoPath, repo?.DefaultBranch ?? "main", link.BranchName);
+                if (!string.IsNullOrWhiteSpace(diff))
+                {
+                    var lines = diff.Split('\n');
+                    totalFiles += lines.Count(l => l.StartsWith("+++ b/"));
+                    totalAdds += lines.Count(l => l.StartsWith('+') && !l.StartsWith("+++"));
+                    totalDels += lines.Count(l => l.StartsWith('-') && !l.StartsWith("---"));
+                }
+            }
+
+            var hasChanges = totalFiles > 0 || hasUncommitted;
+            _changeSummary = new(hasChanges, totalFiles, totalAdds, totalDels, hasUncommitted);
+        }
+        catch
+        {
+            _changeSummary = new(false, 0, 0, 0, false);
+        }
+        finally
+        {
+            _checkingChanges = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private void MarkImplementDone()
+    {
+        _workflow.Steps[PipelineStep.Implement] = StepStatus.Passed;
+        _activeStep = PipelineStep.Validate;
+    }
+
+    // ── Validate Step — test config CRUD + runners ──────────────────────
+
+    private async Task LoadTestConfigsAsync()
+    {
+        if (_workspace is null) return;
+        var repoNames = _workspace.Links.Select(l => l.RepositoryName).ToList();
+        _testConfigs = await Db.RepoTestConfigs
+            .Where(c => repoNames.Contains(c.RepositoryName))
+            .OrderBy(c => c.RepositoryName).ThenBy(c => c.Order)
+            .ToListAsync();
+
+        // Auto-seed from TechStackDetector if no configs exist for a repo
+        foreach (var repoName in repoNames)
+        {
+            if (_testConfigs.Any(c => c.RepositoryName == repoName)) continue;
+            var repoPath = Path.Combine(_options.ReposRoot, repoName);
+            if (!Directory.Exists(repoPath)) continue;
+
+            var stack = LightsOff.Infrastructure.Agents.TechStackDetector.Detect(repoPath);
+            if (stack.TestCommand is null) continue;
+
+            var seed = new RepoTestConfig
+            {
+                RepositoryName = repoName,
+                Name = $"{stack.TestFramework ?? "Tests"}",
+                Command = stack.TestCommand,
+                Order = 1
+            };
+            Db.RepoTestConfigs.Add(seed);
+            await Db.SaveChangesAsync();
+            _testConfigs.Add(seed);
+        }
+    }
+
+    private void AddTestConfig(string repoName)
+    {
+        var nextOrder = _testConfigs.Where(c => c.RepositoryName == repoName).Select(c => c.Order).DefaultIfEmpty(0).Max() + 1;
+        var config = new RepoTestConfig
+        {
+            RepositoryName = repoName,
+            Name = "New test",
+            Command = "",
+            Order = nextOrder
+        };
+        Db.RepoTestConfigs.Add(config);
+        Db.SaveChanges();
+        _testConfigs.Add(config);
+    }
+
+    private async void SaveTestConfigAsync(RepoTestConfig config)
+    {
+        try
+        {
+            Db.RepoTestConfigs.Update(config);
+            await Db.SaveChangesAsync();
+        }
+        catch { /* field-level save, tolerate concurrent edits */ }
+    }
+
+    private async void RemoveTestConfig(RepoTestConfig config)
+    {
+        _testConfigs.Remove(config);
+        Db.RepoTestConfigs.Remove(config);
+        await Db.SaveChangesAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task RunSingleTestAsync(RepoTestConfig config)
+    {
+        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return; }
+        _runningTests = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var cmd = string.IsNullOrEmpty(config.WorkingDir)
+                ? config.Command
+                : $"cd /workspace/{config.RepositoryName}/{config.WorkingDir} && {config.Command}";
+
+            var exitCode = await Docker.ExecAsync(_workspace.ContainerId,
+                new[] { "sh", "-c", $"cd /workspace/{config.RepositoryName} && {config.Command}" }, default);
+
+            var result = new SingleTestResult(config.Name, config.Command, config.WorkingDir,
+                config.RepositoryName, exitCode, exitCode == 0,
+                exitCode == 0 ? "Passed." : $"Failed with exit code {exitCode}.");
+
+            _suiteResult ??= new TestSuiteResult();
+            _suiteResult.Results.RemoveAll(r => r.ConfigName == config.Name && r.RepositoryName == config.RepositoryName);
+            _suiteResult.Results.Add(result);
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { _runningTests = false; await InvokeAsync(StateHasChanged); }
+    }
+
+    private async Task RunAllTestsAsync()
+    {
+        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return; }
+        _runningTests = true;
+        _suiteResult = new TestSuiteResult();
+        _workflow.Steps[PipelineStep.Validate] = StepStatus.Running;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            foreach (var config in _testConfigs)
+            {
+                var exitCode = await Docker.ExecAsync(_workspace.ContainerId,
+                    new[] { "sh", "-c", $"cd /workspace/{config.RepositoryName} && {config.Command}" }, default);
+                _suiteResult.Results.Add(new SingleTestResult(config.Name, config.Command, config.WorkingDir,
+                    config.RepositoryName, exitCode, exitCode == 0,
+                    exitCode == 0 ? "Passed." : $"Failed with exit code {exitCode}."));
+                await InvokeAsync(StateHasChanged);
+            }
+            _workflow.Steps[PipelineStep.Validate] = _suiteResult.AllPassed ? StepStatus.Passed : StepStatus.Failed;
+            Toasts.Success($"Tests: {_suiteResult.PassedCount} passed, {_suiteResult.FailedCount} failed.");
+        }
+        catch (Exception ex)
+        {
+            _workflow.Steps[PipelineStep.Validate] = StepStatus.Failed;
+            Toasts.Error(ex.Message);
+        }
+        finally { _runningTests = false; await InvokeAsync(StateHasChanged); }
+    }
 
     private RenderFragment RenderValidateStep() => __builder =>
     {
         <h3 class="text-sm font-semibold mb-4">Validate (Tests)</h3>
-        <button type="button" @onclick="RunTestsAsync" disabled="@_runningTests"
-                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 mb-4">
-            @if (_runningTests) { <Spinner /> <span>Running tests…</span> }
-            else { <Icon Name="play" Class="w-4 h-4" /> <span>Run tests</span> }
-        </button>
 
-        @if (_testResult is not null)
+        <!-- Test configurations per repo -->
+        @if (_workspace?.Links is not null)
         {
-            <div class="@(_testResult.Passed ? "text-emerald-300" : "text-red-300") text-sm font-medium mb-2">
-                @(_testResult.Passed ? "Tests passed" : "Tests failed") (exit code @_testResult.ExitCode)
-                @if (_testResult.CoveragePercent is not null) { <span class="text-zinc-400 ml-2">Coverage: @_testResult.CoveragePercent.Value.ToString("F1")%</span> }
-            </div>
-            <pre class="text-xs text-zinc-400 bg-zinc-950 border border-zinc-800 rounded-lg p-3 max-h-64 overflow-y-auto whitespace-pre-wrap">@_testResult.Output</pre>
-        }
-    };
-
-    private async Task RunTestsAsync()
-    {
-        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return; }
-        _runningTests = true;
-        _workflow.Steps[PipelineStep.Validate] = StepStatus.Running;
-        try
-        {
-            // Detect test command from .lightsoff.yaml or tech stack
-            var testCmd = "npm test"; // fallback; ideally from RepoConfig/TechStack
-            var firstRepo = _workspace.Links.FirstOrDefault();
-            if (firstRepo is not null)
+            @foreach (var link in _workspace.Links)
             {
-                var configPath = Path.Combine(_options.ReposRoot, firstRepo.RepositoryName);
-                var stack = LightsOff.Infrastructure.Agents.TechStackDetector.Detect(configPath);
-                testCmd = stack.TestCommand ?? "npm test";
-            }
+                var repoName = link.RepositoryName;
+                var configs = _testConfigs.Where(c => c.RepositoryName == repoName).OrderBy(c => c.Order).ToList();
 
-            var exitCode = await Docker.ExecAsync(_workspace.ContainerId,
-                new[] { "sh", "-c", testCmd }, default);
-            _testResult = new TestResult(DateTimeOffset.UtcNow, exitCode, exitCode == 0,
-                exitCode == 0 ? "Tests passed." : $"Tests failed with exit code {exitCode}.", null);
-            _workflow.TestResult = _testResult;
-            _workflow.Steps[PipelineStep.Validate] = _testResult.Passed ? StepStatus.Passed : StepStatus.Failed;
+                <div class="mb-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <h4 class="text-xs uppercase tracking-wider text-zinc-500">@repoName</h4>
+                        <button type="button" @onclick="@(() => AddTestConfig(repoName))"
+                                class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1">
+                            <Icon Name="plus" Class="w-3 h-3" /> Add test
+                        </button>
+                    </div>
+
+                    @if (configs.Count == 0)
+                    {
+                        <div class="text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-md px-3 py-2">
+                            No tests configured. Click "Add test" to define a command.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="rounded-md border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800/80">
+                            @foreach (var config in configs)
+                            {
+                                var result = _suiteResult?.Results.FirstOrDefault(r => r.ConfigName == config.Name && r.RepositoryName == repoName);
+                                <div class="px-3 py-2.5 group">
+                                    <div class="flex items-center gap-2 mb-1">
+                                        @if (result is not null)
+                                        {
+                                            <Icon Name="@(result.Passed ? "check" : "alert")" Class="@($"w-4 h-4 {(result.Passed ? "text-emerald-400" : "text-red-400")} flex-shrink-0")" />
+                                        }
+                                        <input value="@config.Name" @onchange="@(e => { config.Name = (string?)e.Value ?? ""; SaveTestConfigAsync(config); })"
+                                               placeholder="Test name"
+                                               class="bg-transparent border-none text-sm font-medium text-zinc-200 flex-1 min-w-0 focus:outline-none placeholder:text-zinc-600" />
+                                        <button type="button" @onclick="@(() => RunSingleTestAsync(config))"
+                                                disabled="@(_runningTests)"
+                                                class="p-1 rounded text-zinc-500 hover:text-emerald-300 hover:bg-zinc-800 transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-40"
+                                                title="Run this test">
+                                            <Icon Name="play" Class="w-3.5 h-3.5" />
+                                        </button>
+                                        <button type="button" @onclick="@(() => RemoveTestConfig(config))"
+                                                class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
+                                                title="Remove">
+                                            <Icon Name="x" Class="w-3.5 h-3.5" />
+                                        </button>
+                                    </div>
+                                    <div class="flex items-center gap-2 ml-6">
+                                        <code class="text-[10px] text-zinc-500">$</code>
+                                        <input value="@config.Command" @onchange="@(e => { config.Command = (string?)e.Value ?? ""; SaveTestConfigAsync(config); })"
+                                               placeholder="npm test"
+                                               class="bg-transparent border-none text-xs font-mono text-zinc-400 flex-1 min-w-0 focus:outline-none placeholder:text-zinc-600" />
+                                        @if (!string.IsNullOrEmpty(config.WorkingDir))
+                                        {
+                                            <span class="text-[10px] text-zinc-600">in @config.WorkingDir</span>
+                                        }
+                                    </div>
+                                    @if (result is not null && !string.IsNullOrWhiteSpace(result.Output))
+                                    {
+                                        <pre class="mt-2 ml-6 text-[11px] text-zinc-500 bg-zinc-950 border border-zinc-800/60 rounded px-2 py-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap">@result.Output</pre>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
         }
-        catch (Exception ex)
+
+        @if (_suiteResult is not null)
         {
-            _testResult = new TestResult(DateTimeOffset.UtcNow, -1, false, ex.Message, null);
-            _workflow.Steps[PipelineStep.Validate] = StepStatus.Failed;
+            <div class="@(_suiteResult.AllPassed ? "text-emerald-300" : "text-red-300") text-sm font-medium mb-3">
+                @_suiteResult.PassedCount passed · @_suiteResult.FailedCount failed
+            </div>
         }
-        finally { _runningTests = false; }
-    }
+
+        <div class="flex gap-2 pt-2">
+            <button type="button" @onclick="RunAllTestsAsync" disabled="@(_runningTests || _testConfigs.Count == 0)"
+                    class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50">
+                @if (_runningTests) { <Spinner /> <span>Running…</span> }
+                else { <Icon Name="play" Class="w-4 h-4" /> <span>Run all tests</span> }
+            </button>
+        </div>
+    };
 
     // ── Review Step ─────────────────────────────────────────────────────
 

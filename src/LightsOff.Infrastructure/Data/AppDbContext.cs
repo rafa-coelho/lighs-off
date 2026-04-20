@@ -12,6 +12,7 @@ public class AppDbContext : DbContext
     public DbSet<Workspace> Workspaces => Set<Workspace>();
     public DbSet<TicketRepositoryLink> TicketRepositoryLinks => Set<TicketRepositoryLink>();
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
+    public DbSet<RepoTestConfig> RepoTestConfigs => Set<RepoTestConfig>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -47,6 +48,14 @@ public class AppDbContext : DbContext
         {
             b.HasKey(s => s.Key);
             b.Property(s => s.Key).HasMaxLength(100);
+        });
+
+        modelBuilder.Entity<RepoTestConfig>(b =>
+        {
+            b.HasKey(t => t.Id);
+            b.Property(t => t.RepositoryName).HasMaxLength(200);
+            b.Property(t => t.Name).HasMaxLength(200);
+            b.HasIndex(t => t.RepositoryName);
         });
 
         base.OnModelCreating(modelBuilder);
