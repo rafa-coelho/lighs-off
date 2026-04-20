@@ -45,6 +45,15 @@ public interface ICodeAgent
         CancellationToken ct = default);
 
     /// <summary>
+    /// Detect runtime dependencies the repo needs to build and test.
+    /// Local agent: file-system scan for package managers, version files, manifests.
+    /// AI agent: reads config files and infers the full dependency tree.
+    /// </summary>
+    Task<RepoDependencyProfile> DetectDependenciesAsync(
+        string repoPath,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Generate an implementation plan from a ticket analysis.
     /// Local agent: builds mechanically from task breakdown + relevant files.
     /// AI agent: produces a detailed approach, file-by-file.

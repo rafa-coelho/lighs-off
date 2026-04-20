@@ -170,6 +170,34 @@ public class WorkspaceManager : IWorkspaceManager
                 workspace.ContainerName = containerName;
                 workspace.Status = WorkspaceStatus.Running;
 
+                // Auto-detect and install runtime dependencies for each repo
+                var profileStore = new Data.DependencyProfileStore(_db);
+                var depAgent = _agentProvider.GetDefaultAgent();
+                foreach (var (repoName, _) in repoConfigs)
+                {
+                    try
+                    {
+                        var repoPath = Path.Combine(_options.ReposRoot, repoName);
+                        var profile = await profileStore.LoadAsync(repoName, ct).ConfigureAwait(false);
+                        if (profile is null)
+                        {
+                            profile = await depAgent.DetectDependenciesAsync(repoPath, ct).ConfigureAwait(false);
+                            await profileStore.SaveAsync(profile, ct).ConfigureAwait(false);
+                        }
+                        if (profile.Runtimes.Count > 0 || profile.PackageInstallCommands.Count > 0 || profile.CustomCommands.Count > 0)
+                        {
+                            var script = Agents.RuntimeInstaller.GenerateInstallScript(profile);
+                            _logger.LogInformation("Installing dependencies for {Repo}: {Runtimes}",
+                                repoName, string.Join(", ", profile.Runtimes.Select(r => $"{r.Runtime}:{r.Version}")));
+                            await _docker.ExecAsync(containerId, new[] { "sh", "-c", script }, ct).ConfigureAwait(false);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Dependency install failed for {Repo}; container still running", repoName);
+                    }
+                }
+
                 // Post-create commands run inside the container, scoped to each repo's working dir.
                 foreach (var (name, config) in repoConfigs)
                 {

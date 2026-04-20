@@ -50,6 +50,219 @@ public partial class LocalCodeAgent : ICodeAgent
         return Task.FromResult(ctx);
     }
 
+    // ── Dependency detection ─────────────────────────────────────────────
+
+    public Task<RepoDependencyProfile> DetectDependenciesAsync(string repoPath, CancellationToken ct = default)
+    {
+        var repoName = Path.GetFileName(repoPath);
+        var runtimes = new List<RuntimeRequirement>();
+        var pkgCmds = new List<string>();
+
+        // Scan repo root + 2 levels deep for mono-repo support
+        var dirsToScan = new List<(string Path, string? SubPath)> { (repoPath, null) };
+        try
+        {
+            foreach (var sub in Directory.EnumerateDirectories(repoPath)
+                .Where(d => !ShouldSkipDir(Path.GetFileName(d))))
+            {
+                var subName = Path.GetFileName(sub);
+                dirsToScan.Add((sub, subName));
+                foreach (var sub2 in Directory.EnumerateDirectories(sub)
+                    .Where(d => !ShouldSkipDir(Path.GetFileName(d))).Take(10))
+                {
+                    dirsToScan.Add((sub2, $"{subName}/{Path.GetFileName(sub2)}"));
+                }
+            }
+        }
+        catch { /* permission errors, etc. */ }
+
+        foreach (var (dir, subPath) in dirsToScan)
+        {
+            // Node.js
+            if (File.Exists(Path.Combine(dir, "package.json")))
+            {
+                var version = DetectNodeVersion(dir);
+                runtimes.Add(new RuntimeRequirement("node", version, subPath));
+
+                var installCmd = DetectNodeInstallCommand(dir);
+                var prefix = subPath is null ? "" : $"cd /workspace/{repoName}/{subPath} && ";
+                pkgCmds.Add($"{prefix}{installCmd}");
+            }
+
+            // .NET
+            var csprojFiles = Directory.EnumerateFiles(dir, "*.csproj", SearchOption.TopDirectoryOnly).ToList();
+            if (csprojFiles.Count > 0 || File.Exists(Path.Combine(dir, "*.sln")))
+            {
+                var version = DetectDotnetVersion(dir);
+                runtimes.Add(new RuntimeRequirement("dotnet", version, subPath));
+                var prefix = subPath is null ? "" : $"cd /workspace/{repoName}/{subPath} && ";
+                pkgCmds.Add($"{prefix}dotnet restore");
+            }
+
+            // Python
+            if (File.Exists(Path.Combine(dir, "requirements.txt")) ||
+                File.Exists(Path.Combine(dir, "pyproject.toml")) ||
+                File.Exists(Path.Combine(dir, "setup.py")))
+            {
+                var version = DetectPythonVersion(dir);
+                runtimes.Add(new RuntimeRequirement("python", version, subPath));
+                if (File.Exists(Path.Combine(dir, "requirements.txt")))
+                {
+                    var prefix = subPath is null ? "" : $"cd /workspace/{repoName}/{subPath} && ";
+                    pkgCmds.Add($"{prefix}pip install -r requirements.txt");
+                }
+            }
+
+            // Go
+            if (File.Exists(Path.Combine(dir, "go.mod")))
+            {
+                var version = DetectGoVersion(dir);
+                runtimes.Add(new RuntimeRequirement("go", version, subPath));
+                var prefix = subPath is null ? "" : $"cd /workspace/{repoName}/{subPath} && ";
+                pkgCmds.Add($"{prefix}go mod download");
+            }
+
+            // Java
+            if (File.Exists(Path.Combine(dir, "pom.xml")) ||
+                File.Exists(Path.Combine(dir, "build.gradle")) ||
+                File.Exists(Path.Combine(dir, "build.gradle.kts")))
+            {
+                runtimes.Add(new RuntimeRequirement("java", "21", subPath));
+            }
+
+            // Ruby
+            if (File.Exists(Path.Combine(dir, "Gemfile")))
+            {
+                var version = DetectRubyVersion(dir);
+                runtimes.Add(new RuntimeRequirement("ruby", version, subPath));
+                var prefix = subPath is null ? "" : $"cd /workspace/{repoName}/{subPath} && ";
+                pkgCmds.Add($"{prefix}bundle install");
+            }
+
+            // Rust
+            if (File.Exists(Path.Combine(dir, "Cargo.toml")))
+            {
+                runtimes.Add(new RuntimeRequirement("rust", "latest", subPath));
+                var prefix = subPath is null ? "" : $"cd /workspace/{repoName}/{subPath} && ";
+                pkgCmds.Add($"{prefix}cargo fetch");
+            }
+        }
+
+        // Deduplicate runtimes by type (keep first = shallowest path)
+        var deduped = runtimes
+            .GroupBy(r => r.Runtime, StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
+
+        var profile = new RepoDependencyProfile
+        {
+            RepositoryName = repoName,
+            AgentUsed = Id,
+            Runtimes = deduped,
+            PackageInstallCommands = pkgCmds
+        };
+
+        _logger.LogInformation("Detected dependencies for {Repo}: {Runtimes}",
+            repoName, string.Join(", ", deduped.Select(r => $"{r.Runtime}:{r.Version}")));
+
+        return Task.FromResult(profile);
+    }
+
+    private static bool ShouldSkipDir(string name) =>
+        name is "node_modules" or "bin" or "obj" or ".git" or "dist" or ".next" or
+            "__pycache__" or "venv" or ".venv" or "vendor" or "target" or ".lightsoff" or
+            ".vs" or ".idea" or "coverage" or ".cache";
+
+    private static string DetectNodeVersion(string dir)
+    {
+        // .nvmrc
+        var nvmrc = Path.Combine(dir, ".nvmrc");
+        if (File.Exists(nvmrc))
+        {
+            var v = File.ReadAllText(nvmrc).Trim().TrimStart('v');
+            if (int.TryParse(v.Split('.')[0], out var major) && major > 0) return major.ToString();
+        }
+        // .node-version
+        var nv = Path.Combine(dir, ".node-version");
+        if (File.Exists(nv))
+        {
+            var v = File.ReadAllText(nv).Trim().TrimStart('v');
+            if (int.TryParse(v.Split('.')[0], out var major) && major > 0) return major.ToString();
+        }
+        // engines.node in package.json
+        try
+        {
+            var pkg = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(dir, "package.json")));
+            if (pkg.RootElement.TryGetProperty("engines", out var engines) &&
+                engines.TryGetProperty("node", out var nodeV))
+            {
+                var raw = nodeV.GetString()?.Trim('^', '~', '>', '=', '<', ' ') ?? "";
+                if (int.TryParse(raw.Split('.')[0], out var major) && major > 0) return major.ToString();
+            }
+        }
+        catch { }
+        return "20"; // LTS default
+    }
+
+    private static string DetectNodeInstallCommand(string dir)
+    {
+        if (File.Exists(Path.Combine(dir, "pnpm-lock.yaml"))) return "pnpm install";
+        if (File.Exists(Path.Combine(dir, "yarn.lock"))) return "yarn install";
+        if (File.Exists(Path.Combine(dir, "bun.lockb"))) return "bun install";
+        return "npm install";
+    }
+
+    private static string DetectDotnetVersion(string dir)
+    {
+        foreach (var csproj in Directory.EnumerateFiles(dir, "*.csproj", SearchOption.AllDirectories).Take(5))
+        {
+            try
+            {
+                var content = File.ReadAllText(csproj);
+                var match = Regex.Match(content, @"<TargetFramework>net(\d+\.\d+)</TargetFramework>");
+                if (match.Success) return match.Groups[1].Value;
+                var matchShort = Regex.Match(content, @"<TargetFramework>net(\d+)</TargetFramework>");
+                if (matchShort.Success) return matchShort.Groups[1].Value + ".0";
+            }
+            catch { }
+        }
+        return "10.0";
+    }
+
+    private static string DetectPythonVersion(string dir)
+    {
+        var pv = Path.Combine(dir, ".python-version");
+        if (File.Exists(pv))
+        {
+            var v = File.ReadAllText(pv).Trim();
+            if (!string.IsNullOrEmpty(v)) return v;
+        }
+        return "3.12";
+    }
+
+    private static string DetectGoVersion(string dir)
+    {
+        try
+        {
+            var gomod = File.ReadAllText(Path.Combine(dir, "go.mod"));
+            var match = Regex.Match(gomod, @"^go\s+(\d+\.\d+)", RegexOptions.Multiline);
+            if (match.Success) return match.Groups[1].Value;
+        }
+        catch { }
+        return "1.22";
+    }
+
+    private static string DetectRubyVersion(string dir)
+    {
+        var rv = Path.Combine(dir, ".ruby-version");
+        if (File.Exists(rv))
+        {
+            var v = File.ReadAllText(rv).Trim();
+            if (!string.IsNullOrEmpty(v)) return v;
+        }
+        return "3.3";
+    }
+
     // ── Ticket analysis ────────────────────────────────────────────────────
 
     public Task<TicketAnalysis> AnalyzeTicketAsync(

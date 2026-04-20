@@ -78,6 +78,17 @@ public static class DependencyInjection
             await db.Database.ExecuteSqlRawAsync(
                 """ALTER TABLE "Workspaces" ADD COLUMN "WorkflowStateJson" TEXT""", ct).ConfigureAwait(false);
         }
-        catch { /* column already exists — SQLite throws on duplicate ALTER, safe to ignore */ }
+        catch { /* column already exists */ }
+
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "RepoDependencyProfiles" (
+                "RepositoryName" TEXT NOT NULL PRIMARY KEY,
+                "DetectedAt" TEXT NOT NULL,
+                "AgentUsed" TEXT NOT NULL,
+                "RuntimesJson" TEXT NOT NULL DEFAULT '[]',
+                "PackageInstallCommandsJson" TEXT NOT NULL DEFAULT '[]',
+                "CustomCommandsJson" TEXT NOT NULL DEFAULT '[]'
+            )
+            """, ct).ConfigureAwait(false);
     }
 }

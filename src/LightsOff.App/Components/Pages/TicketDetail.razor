@@ -129,7 +129,12 @@ else
     private CodeReview? _review;
     private bool _reviewing;
 
-    // Implement state
+    // Implement state — dependencies
+    private Dictionary<string, RepoDependencyProfile> _depProfiles = new();
+    private string? _depEditing;
+    private bool _reinstalling;
+
+    // Implement state — changes
     private ChangeSummary? _changeSummary;
     private bool _checkingChanges;
 
@@ -172,6 +177,7 @@ else
             {
                 LoadWorkflowState();
                 await LoadTestConfigsAsync();
+                await LoadDepProfilesAsync();
                 // Only auto-analyze if no saved state exists (first time opening this ticket)
                 if (_workflow.Steps[PipelineStep.Analyze] == StepStatus.Pending)
                 {
@@ -467,6 +473,134 @@ else
         <h3 class="text-sm font-semibold mb-4">Implement</h3>
         <div class="text-sm text-zinc-400 mb-4">Code your changes inside the container. When done, move to Validate.</div>
 
+        <!-- Dependency profiles per repo -->
+        @if (_workspace?.Links is not null)
+        {
+            @foreach (var link in _workspace.Links)
+            {
+                var repoName = link.RepositoryName;
+                _depProfiles.TryGetValue(repoName, out var profile);
+                if (profile is not null)
+                {
+                    <details class="rounded-lg border border-zinc-800 bg-zinc-950/40 mb-4 group/deps" open="@(_depEditing == repoName)">
+                        <summary class="px-4 py-3 cursor-pointer flex items-center justify-between text-sm hover:bg-zinc-900/40 transition-colors"
+                                 @onclick="@(() => _depEditing = _depEditing == repoName ? null : repoName)">
+                            <div class="flex items-center gap-2">
+                                <Icon Name="settings" Class="w-4 h-4 text-zinc-500" />
+                                <span class="font-medium">@repoName</span>
+                                <span class="text-xs text-zinc-500">@string.Join(", ", profile.Runtimes.Select(r => $"{r.Runtime} {r.Version}"))</span>
+                            </div>
+                            <span class="text-[10px] text-zinc-600">@profile.Runtimes.Count runtime(s)</span>
+                        </summary>
+
+                        <div class="px-4 pb-4 space-y-3 border-t border-zinc-800/80 pt-3">
+                            <!-- Runtimes -->
+                            <div>
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <label class="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Runtimes</label>
+                                    <button type="button" @onclick="@(async () => { profile.Runtimes.Add(new RuntimeRequirement("node", "20", null)); await SaveDepProfileAsync(profile); })"
+                                            class="text-[10px] text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-0.5">
+                                        <Icon Name="plus" Class="w-2.5 h-2.5" /> Add
+                                    </button>
+                                </div>
+                                @for (var ri = 0; ri < profile.Runtimes.Count; ri++)
+                                {
+                                    var rIdx = ri;
+                                    var rt = profile.Runtimes[rIdx];
+                                    <div class="flex items-center gap-2 group/rt">
+                                        <select value="@rt.Runtime" @onchange="@(async e => { profile.Runtimes[rIdx] = rt with { Runtime = (string?)e.Value ?? "node" }; await SaveDepProfileAsync(profile); })"
+                                                class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs w-24 focus:outline-none focus:ring-1 focus:ring-emerald-500/40">
+                                            @foreach (var r in LightsOff.Infrastructure.Agents.RuntimeInstaller.SupportedRuntimes)
+                                            {
+                                                <option value="@r" selected="@(r == rt.Runtime)">@r</option>
+                                            }
+                                        </select>
+                                        <input value="@rt.Version" @onchange="@(async e => { profile.Runtimes[rIdx] = rt with { Version = (string?)e.Value ?? "latest" }; await SaveDepProfileAsync(profile); })"
+                                               placeholder="version"
+                                               class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs font-mono w-20 focus:outline-none focus:ring-1 focus:ring-emerald-500/40" />
+                                        <input value="@rt.SubPath" @onchange="@(async e => { profile.Runtimes[rIdx] = rt with { SubPath = string.IsNullOrWhiteSpace((string?)e.Value) ? null : ((string)e.Value!).Trim() }; await SaveDepProfileAsync(profile); })"
+                                               placeholder="subpath (optional)"
+                                               class="bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs font-mono flex-1 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-emerald-500/40" />
+                                        <button type="button" @onclick="@(async () => { profile.Runtimes.RemoveAt(rIdx); await SaveDepProfileAsync(profile); await InvokeAsync(StateHasChanged); })"
+                                                class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover/rt:opacity-100 transition-all">
+                                            <Icon Name="x" Class="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                }
+                            </div>
+
+                            <!-- Package install commands -->
+                            <div>
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <label class="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Package install</label>
+                                    <button type="button" @onclick="@(async () => { profile.PackageInstallCommands.Add(""); await InvokeAsync(StateHasChanged); })"
+                                            class="text-[10px] text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-0.5">
+                                        <Icon Name="plus" Class="w-2.5 h-2.5" /> Add
+                                    </button>
+                                </div>
+                                @for (var pi = 0; pi < profile.PackageInstallCommands.Count; pi++)
+                                {
+                                    var pIdx = pi;
+                                    <div class="flex items-center gap-1.5 group/pkg">
+                                        <code class="text-zinc-700 text-[10px]">$</code>
+                                        <input value="@profile.PackageInstallCommands[pIdx]"
+                                               @onchange="@(async e => { profile.PackageInstallCommands[pIdx] = (string?)e.Value ?? ""; await SaveDepProfileAsync(profile); })"
+                                               class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500/40" />
+                                        <button type="button" @onclick="@(async () => { profile.PackageInstallCommands.RemoveAt(pIdx); await SaveDepProfileAsync(profile); await InvokeAsync(StateHasChanged); })"
+                                                class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover/pkg:opacity-100 transition-all">
+                                            <Icon Name="x" Class="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                }
+                            </div>
+
+                            <!-- Custom commands -->
+                            <div>
+                                <div class="flex items-center justify-between mb-1.5">
+                                    <label class="text-[10px] uppercase tracking-wider text-zinc-500 font-semibold">Custom commands</label>
+                                    <button type="button" @onclick="@(async () => { profile.CustomCommands.Add(""); await InvokeAsync(StateHasChanged); })"
+                                            class="text-[10px] text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-0.5">
+                                        <Icon Name="plus" Class="w-2.5 h-2.5" /> Add
+                                    </button>
+                                </div>
+                                @for (var ci = 0; ci < profile.CustomCommands.Count; ci++)
+                                {
+                                    var cIdx = ci;
+                                    <div class="flex items-center gap-1.5 group/cust">
+                                        <code class="text-zinc-700 text-[10px]">$</code>
+                                        <input value="@profile.CustomCommands[cIdx]"
+                                               @onchange="@(async e => { profile.CustomCommands[cIdx] = (string?)e.Value ?? ""; await SaveDepProfileAsync(profile); })"
+                                               placeholder="apt-get install -y redis-tools"
+                                               class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2 py-1 text-xs font-mono placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-emerald-500/40" />
+                                        <button type="button" @onclick="@(async () => { profile.CustomCommands.RemoveAt(cIdx); await SaveDepProfileAsync(profile); await InvokeAsync(StateHasChanged); })"
+                                                class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover/cust:opacity-100 transition-all">
+                                            <Icon Name="x" Class="w-3 h-3" />
+                                        </button>
+                                    </div>
+                                }
+                                @if (profile.CustomCommands.Count == 0)
+                                {
+                                    <div class="text-[10px] text-zinc-600">e.g. <code>apt-get install -y redis-tools</code></div>
+                                }
+                            </div>
+
+                            <div class="flex gap-2 pt-2">
+                                <button type="button" @onclick="@(() => ReinstallDepsAsync(profile))" disabled="@_reinstalling"
+                                        class="inline-flex items-center gap-1 h-7 px-3 rounded-md text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-100 transition-colors disabled:opacity-50">
+                                    @if (_reinstalling) { <Spinner Class="w-3 h-3" /> <span>Installing…</span> }
+                                    else { <Icon Name="play" Class="w-3 h-3" /> <span>Reinstall in container</span> }
+                                </button>
+                                <button type="button" @onclick="@(() => RedetectDepsAsync(repoName))"
+                                        class="inline-flex items-center gap-1 h-7 px-3 rounded-md text-xs text-zinc-500 hover:text-zinc-300 border border-zinc-800 hover:bg-zinc-800/60 transition-colors">
+                                    <Icon Name="refresh" Class="w-3 h-3" /> Re-detect
+                                </button>
+                            </div>
+                        </div>
+                    </details>
+                }
+            }
+        }
+
         @if (_workspace?.ContainerName is not null)
         {
             <div class="flex items-center gap-2 mb-4">
@@ -515,6 +649,67 @@ else
             </button>
         </div>
     };
+
+    private async Task LoadDepProfilesAsync()
+    {
+        if (_workspace is null) return;
+        var store = new LightsOff.Infrastructure.Data.DependencyProfileStore(Db);
+        foreach (var link in _workspace.Links)
+        {
+            var profile = await store.LoadAsync(link.RepositoryName);
+            if (profile is not null)
+            {
+                _depProfiles[link.RepositoryName] = profile;
+            }
+        }
+    }
+
+    private async Task SaveDepProfileAsync(RepoDependencyProfile profile)
+    {
+        var store = new LightsOff.Infrastructure.Data.DependencyProfileStore(Db);
+        await store.SaveAsync(profile);
+    }
+
+    private async Task ReinstallDepsAsync(RepoDependencyProfile profile)
+    {
+        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return; }
+        _reinstalling = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var script = LightsOff.Infrastructure.Agents.RuntimeInstaller.GenerateInstallScript(profile);
+            await Docker.ExecAsync(_workspace.ContainerId, new[] { "sh", "-c", script }, default);
+            Toasts.Success($"Dependencies installed for {profile.RepositoryName}.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Install failed: {ex.Message}");
+        }
+        finally
+        {
+            _reinstalling = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RedetectDepsAsync(string repoName)
+    {
+        var repoPath = Path.Combine(_options.ReposRoot, repoName);
+        if (!Directory.Exists(repoPath)) return;
+        try
+        {
+            var agent = AgentProvider.GetDefaultAgent();
+            var profile = await agent.DetectDependenciesAsync(repoPath);
+            _depProfiles[repoName] = profile;
+            await SaveDepProfileAsync(profile);
+            Toasts.Success($"Re-detected: {string.Join(", ", profile.Runtimes.Select(r => $"{r.Runtime}:{r.Version}"))}");
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
 
     private async Task CheckChangesAsync()
     {
@@ -922,7 +1117,7 @@ else
                                                                    class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs font-mono placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition-colors" />
                                                             @if (commands.Count > 1)
                                                             {
-                                                                <button type="button" @onclick="@(() => RemoveCommand(config, cmdIdx))"
+                                                                <button type="button" @onclick="@(async () => { RemoveCommand(config, cmdIdx); await InvokeAsync(StateHasChanged); })"
                                                                         class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover/cmd:opacity-100 transition-all">
                                                                     <Icon Name="x" Class="w-3 h-3" />
                                                                 </button>
@@ -930,7 +1125,7 @@ else
                                                         </div>
                                                     }
                                                 </div>
-                                                <button type="button" @onclick="@(() => { AddCommand(config); InvokeAsync(StateHasChanged); })"
+                                                <button type="button" @onclick="@(async () => { AddCommand(config); await InvokeAsync(StateHasChanged); })"
                                                         class="mt-2 w-full flex items-center justify-center gap-1.5 h-8 rounded border border-dashed border-zinc-700 text-xs text-zinc-500 hover:text-zinc-200 hover:border-zinc-500 transition-colors">
                                                     <Icon Name="plus" Class="w-3 h-3" /> Add command
                                                 </button>

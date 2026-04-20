@@ -70,6 +70,15 @@ public class ClaudeCodeAgent : ICodeAgent
         return review;
     }
 
+    public async Task<RepoDependencyProfile> DetectDependenciesAsync(string repoPath, CancellationToken ct = default)
+    {
+        EnsureAvailable();
+        _logger.LogInformation("ClaudeCodeAgent.DetectDependenciesAsync: falling back to local (API integration pending)");
+        var profile = await _fallback.DetectDependenciesAsync(repoPath, ct);
+        profile.AgentUsed = Id;
+        return profile;
+    }
+
     public async Task<ImplementationPlan> GeneratePlanAsync(Ticket ticket, TicketAnalysis analysis, IReadOnlyList<RepoContext> repoContexts, CancellationToken ct = default)
     {
         EnsureAvailable();
