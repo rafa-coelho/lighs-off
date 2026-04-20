@@ -7,7 +7,7 @@
 
 <PageTitle>Workspaces</PageTitle>
 
-<PageHeader Title="Workspaces" Description="Per-ticket workspaces: cloned repos + Docker container.">
+<PageHeader Title="Workspaces" Description="Per-ticket workspaces with cloned repos and their Docker container.">
     <Actions>
         <button type="button" @onclick="LoadAsync" disabled="@_loading"
                 class="inline-flex items-center gap-2 h-9 px-3 rounded-md text-sm text-zinc-300 hover:text-zinc-50 hover:bg-zinc-800/50 transition-colors disabled:opacity-50">
@@ -20,9 +20,7 @@
 @if (_dockerAvailable == false)
 {
     <div class="mb-4">
-        <Alert Kind="Alert.AlertKind.Warning">
-            Docker daemon not reachable. Container status and actions will fail until Docker is running.
-        </Alert>
+        <Alert Kind="Alert.AlertKind.Warning">Docker daemon not reachable. Container actions will fail.</Alert>
     </div>
 }
 
@@ -37,100 +35,96 @@ else if (_workspaces.Count == 0)
 }
 else
 {
-    <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/30 overflow-hidden">
-        <table class="w-full text-sm">
-            <thead class="text-xs uppercase tracking-wider text-zinc-500 bg-zinc-950/50">
-                <tr>
-                    <th class="text-left font-medium py-3 px-4 w-32">Ticket</th>
-                    <th class="text-left font-medium py-3 px-4">Summary</th>
-                    <th class="text-left font-medium py-3 px-4 w-24">Status</th>
-                    <th class="text-left font-medium py-3 px-4">Repos</th>
-                    <th class="text-left font-medium py-3 px-4 w-36">Created</th>
-                    <th class="text-right font-medium py-3 px-4 w-64">Actions</th>
-                </tr>
-            </thead>
-            <tbody class="divide-y divide-zinc-800/60">
-                @foreach (var w in _workspaces)
-                {
-                    var busy = _busyKey == w.TicketKey;
-                    <tr class="hover:bg-zinc-900/50 transition-colors group" @key="w.TicketKey">
-                        <td class="py-3 px-4">
-                            <a href="@($"/tickets/{w.TicketKey}")" class="text-emerald-400 hover:text-emerald-300 font-medium">
-                                <code>@w.TicketKey</code>
-                            </a>
-                        </td>
-                        <td class="py-3 px-4 text-zinc-200 truncate max-w-sm">@w.TicketSummary</td>
-                        <td class="py-3 px-4">
-                            <span class="@StatusBadgeClasses(w.Status)">@w.Status</span>
-                        </td>
-                        <td class="py-3 px-4">
-                            <div class="flex flex-wrap gap-1">
-                                @foreach (var link in w.Links)
-                                {
-                                    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-zinc-800 text-zinc-300 border border-zinc-700" title="@link.BranchName">
-                                        @link.RepositoryName
-                                    </span>
-                                }
+    <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        @foreach (var w in _workspaces)
+        {
+            var busy = _busyKey == w.TicketKey;
+            <div class="rounded-xl border @StatusBorderColor(w.Status) bg-zinc-900/40 hover:bg-zinc-900/60 transition-colors overflow-hidden group" @key="w.TicketKey">
+                <!-- Header -->
+                <a href="@($"/workspaces/{w.TicketKey}")" class="block px-5 pt-4 pb-3">
+                    <div class="flex items-start justify-between gap-3 mb-2">
+                        <div class="min-w-0">
+                            <code class="text-base font-semibold text-emerald-400">@w.TicketKey</code>
+                            <div class="text-sm text-zinc-300 mt-0.5 truncate">@w.TicketSummary</div>
+                        </div>
+                        <span class="@StatusBadgeClasses(w.Status) flex-shrink-0">@w.Status</span>
+                    </div>
+
+                    <!-- Repos -->
+                    <div class="flex flex-wrap gap-1 mt-2">
+                        @foreach (var link in w.Links)
+                        {
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-zinc-800 text-zinc-300 border border-zinc-700">
+                                <Icon Name="folder" Class="w-3 h-3 text-zinc-500" />
+                                @link.RepositoryName
+                            </span>
+                        }
+                    </div>
+
+                    <!-- Meta -->
+                    <div class="flex items-center gap-4 mt-3 text-xs text-zinc-500">
+                        @if (!string.IsNullOrEmpty(w.ContainerName))
+                        {
+                            <div class="flex items-center gap-1">
+                                <Icon Name="terminal" Class="w-3 h-3" />
+                                <span class="font-mono">@w.ContainerName</span>
                             </div>
-                        </td>
-                        <td class="py-3 px-4 text-zinc-500 tabular-nums text-xs">@w.CreatedAt.ToLocalTime().ToString("g")</td>
-                        <td class="py-3 px-4">
-                            <div class="flex justify-end gap-1">
-                                @if (!string.IsNullOrEmpty(w.ContainerName))
-                                {
-                                    <button type="button" @onclick="() => CopyAttachAsync(w)"
-                                            disabled="@busy"
-                                            class="p-1.5 rounded-md text-zinc-400 hover:text-emerald-300 hover:bg-zinc-800 transition-colors disabled:opacity-40"
-                                            title="Copy docker exec command">
-                                        <Icon Name="copy" Class="w-4 h-4" />
-                                    </button>
-                                }
-                                @if (w.Status == WorkspaceStatus.Running)
-                                {
-                                    <button type="button" @onclick="() => StopAsync(w)"
-                                            disabled="@busy"
-                                            class="p-1.5 rounded-md text-zinc-400 hover:text-amber-300 hover:bg-zinc-800 transition-colors disabled:opacity-40"
-                                            title="Stop container">
-                                        @if (busy) { <Spinner Class="w-4 h-4" /> }
-                                        else { <Icon Name="stop" Class="w-4 h-4" /> }
-                                    </button>
-                                }
-                                else if (w.Status is WorkspaceStatus.Stopped or WorkspaceStatus.Created)
-                                {
-                                    @if (!string.IsNullOrEmpty(w.ContainerId))
-                                    {
-                                        <button type="button" @onclick="() => StartAsync(w)"
-                                                disabled="@busy"
-                                                class="p-1.5 rounded-md text-zinc-400 hover:text-emerald-300 hover:bg-zinc-800 transition-colors disabled:opacity-40"
-                                                title="Start container">
-                                            @if (busy) { <Spinner Class="w-4 h-4" /> }
-                                            else { <Icon Name="play" Class="w-4 h-4" /> }
-                                        </button>
-                                    }
-                                    else
-                                    {
-                                        <span class="p-1.5 text-zinc-600 text-[10px]" title="No container — destroy and recreate with Docker running">
-                                            no container
-                                        </span>
-                                    }
-                                }
-                                <button type="button" @onclick="() => DestroyAsync(w)"
-                                        disabled="@busy"
-                                        class="p-1.5 rounded-md text-zinc-400 hover:text-red-400 hover:bg-zinc-800 transition-colors disabled:opacity-40"
-                                        title="Destroy workspace">
-                                    @if (busy) { <Spinner Class="w-4 h-4" /> }
-                                    else { <Icon Name="trash" Class="w-4 h-4" /> }
-                                </button>
+                        }
+                        <div class="flex items-center gap-1">
+                            <span>@w.CreatedAt.ToLocalTime().ToString("MMM dd, HH:mm")</span>
+                        </div>
+                        @if (w.Links.Count > 0)
+                        {
+                            <div class="flex items-center gap-1 font-mono truncate max-w-32">
+                                @w.Links.First().BranchName
                             </div>
-                        </td>
-                    </tr>
-                }
-            </tbody>
-        </table>
+                        }
+                    </div>
+                </a>
+
+                <!-- Actions bar -->
+                <div class="flex items-center gap-1 px-5 py-2.5 border-t border-zinc-800/60 bg-zinc-950/30">
+                    @if (!string.IsNullOrEmpty(w.ContainerName))
+                    {
+                        <button type="button" @onclick="() => CopyAttachAsync(w)" disabled="@busy"
+                                class="inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-xs text-zinc-400 hover:text-emerald-300 hover:bg-zinc-800 transition-colors disabled:opacity-40"
+                                title="Copy docker exec command">
+                            <Icon Name="copy" Class="w-3.5 h-3.5" /> Attach
+                        </button>
+                    }
+                    @if (w.Status == WorkspaceStatus.Running)
+                    {
+                        <button type="button" @onclick="() => StopAsync(w)" disabled="@busy"
+                                class="inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-xs text-zinc-400 hover:text-amber-300 hover:bg-zinc-800 transition-colors disabled:opacity-40">
+                            @if (busy) { <Spinner Class="w-3.5 h-3.5" /> } else { <Icon Name="stop" Class="w-3.5 h-3.5" /> }
+                            Stop
+                        </button>
+                    }
+                    else if (w.Status is WorkspaceStatus.Stopped or WorkspaceStatus.Created && !string.IsNullOrEmpty(w.ContainerId))
+                    {
+                        <button type="button" @onclick="() => StartAsync(w)" disabled="@busy"
+                                class="inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-xs text-zinc-400 hover:text-emerald-300 hover:bg-zinc-800 transition-colors disabled:opacity-40">
+                            @if (busy) { <Spinner Class="w-3.5 h-3.5" /> } else { <Icon Name="play" Class="w-3.5 h-3.5" /> }
+                            Start
+                        </button>
+                    }
+
+                    <div class="flex-1"></div>
+
+                    <a href="@($"/tickets/{w.TicketKey}")"
+                       class="inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-xs text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 transition-colors">
+                        <Icon Name="ticket" Class="w-3.5 h-3.5" /> Ticket
+                    </a>
+                    <button type="button" @onclick="() => DestroyAsync(w)" disabled="@busy"
+                            class="inline-flex items-center gap-1.5 h-7 px-2.5 rounded text-xs text-zinc-400 hover:text-red-400 hover:bg-zinc-800 transition-colors disabled:opacity-40">
+                        @if (busy) { <Spinner Class="w-3.5 h-3.5" /> } else { <Icon Name="trash" Class="w-3.5 h-3.5" /> }
+                        Destroy
+                    </button>
+                </div>
+            </div>
+        }
     </div>
-    <div class="mt-3 text-xs text-zinc-500">
-        @_workspaces.Count workspace@(_workspaces.Count == 1 ? "" : "s")
-    </div>
+    <div class="mt-4 text-xs text-zinc-500">@_workspaces.Count workspace@(_workspaces.Count == 1 ? "" : "s")</div>
 }
 
 @code {
@@ -152,88 +146,44 @@ else
             _workspaces = await listTask;
             _dockerAvailable = await dockerTask;
         }
-        finally
-        {
-            _loading = false;
-        }
+        finally { _loading = false; }
     }
 
     private async Task StartAsync(Workspace w)
     {
         _busyKey = w.TicketKey;
-        try
-        {
-            await Manager.StartAsync(w.TicketKey);
-            Toasts.Success($"Started {w.TicketKey}.");
-            await LoadAsync();
-        }
-        catch (Exception ex)
-        {
-            Toasts.Error(ex.Message);
-        }
-        finally
-        {
-            _busyKey = null;
-        }
+        try { await Manager.StartAsync(w.TicketKey); Toasts.Success($"Started {w.TicketKey}."); await LoadAsync(); }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { _busyKey = null; }
     }
 
     private async Task StopAsync(Workspace w)
     {
         _busyKey = w.TicketKey;
-        try
-        {
-            await Manager.StopAsync(w.TicketKey);
-            Toasts.Info($"Stopped {w.TicketKey}.");
-            await LoadAsync();
-        }
-        catch (Exception ex)
-        {
-            Toasts.Error(ex.Message);
-        }
-        finally
-        {
-            _busyKey = null;
-        }
+        try { await Manager.StopAsync(w.TicketKey); Toasts.Info($"Stopped {w.TicketKey}."); await LoadAsync(); }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { _busyKey = null; }
     }
 
     private async Task DestroyAsync(Workspace w)
     {
         _busyKey = w.TicketKey;
-        try
-        {
-            await Manager.DestroyAsync(w.TicketKey);
-            Toasts.Info($"Destroyed {w.TicketKey}.");
-            await LoadAsync();
-        }
-        catch (Exception ex)
-        {
-            Toasts.Error(ex.Message);
-        }
-        finally
-        {
-            _busyKey = null;
-        }
+        try { await Manager.DestroyAsync(w.TicketKey); Toasts.Info($"Destroyed {w.TicketKey}."); await LoadAsync(); }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { _busyKey = null; }
     }
 
     private async Task CopyAttachAsync(Workspace w)
     {
         if (string.IsNullOrEmpty(w.ContainerName)) return;
-        var cmd = $"docker exec -it {w.ContainerName} bash";
-        try
-        {
-            await JS.InvokeVoidAsync("navigator.clipboard.writeText", cmd);
-            Toasts.Success("Attach command copied.");
-        }
-        catch
-        {
-            Toasts.Info(cmd);
-        }
+        try { await JS.InvokeVoidAsync("navigator.clipboard.writeText", $"docker exec -it {w.ContainerName} bash"); Toasts.Success("Copied."); }
+        catch { Toasts.Info($"docker exec -it {w.ContainerName} bash"); }
     }
 
     private static string StatusBadgeClasses(WorkspaceStatus status)
     {
-        var baseClasses = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ";
-        return baseClasses + status switch
+        var b = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ";
+        return b + status switch
         {
             WorkspaceStatus.Running => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
             WorkspaceStatus.Stopped => "bg-zinc-800/70 text-zinc-400 border-zinc-700",
@@ -241,4 +191,11 @@ else
             _ => "bg-sky-500/10 text-sky-300 border-sky-500/30"
         };
     }
+
+    private static string StatusBorderColor(WorkspaceStatus status) => status switch
+    {
+        WorkspaceStatus.Running => "border-emerald-900/50",
+        WorkspaceStatus.Stopped => "border-zinc-800",
+        _ => "border-zinc-800/80"
+    };
 }
