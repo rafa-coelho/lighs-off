@@ -1,6 +1,7 @@
 @page "/tickets/{TicketKey}"
 @using LightsOff.Core.Configuration
 @using Microsoft.EntityFrameworkCore
+@using System.Text.Json
 @using LightsOff.Core.Utilities
 @using Microsoft.Extensions.Options
 @inject IJiraClient Jira
@@ -122,6 +123,7 @@ else
     private List<RepoTestConfig> _testConfigs = new();
     private TestSuiteResult? _suiteResult;
     private bool _runningTests;
+    private int? _editingTestId;
 
     // Review state
     private CodeReview? _review;
@@ -168,8 +170,13 @@ else
 
             if (_workspace is not null)
             {
+                LoadWorkflowState();
                 await LoadTestConfigsAsync();
-                await RunAnalysisAsync();
+                // Only auto-analyze if no saved state exists (first time opening this ticket)
+                if (_workflow.Steps[PipelineStep.Analyze] == StepStatus.Pending)
+                {
+                    await RunAnalysisAsync();
+                }
             }
             else
             {
@@ -219,6 +226,7 @@ else
             _workflow.Steps[PipelineStep.Plan] = StepStatus.AwaitingApproval;
 
             Toasts.Success($"Analysis complete: {_analysis.Gaps.Count} finding(s), {_analysis.Tasks.Count} task(s).");
+            await SaveWorkflowStateAsync();
         }
         catch (Exception ex)
         {
@@ -394,7 +402,7 @@ else
         }
     };
 
-    private void ApprovePlan()
+    private async Task ApprovePlan()
     {
         if (_plan is null) return;
         _plan.Status = PlanStatus.Approved;
@@ -404,15 +412,17 @@ else
         _planComment = string.Empty;
         _activeStep = PipelineStep.Implement;
         Toasts.Success("Plan approved. Implement step unlocked.");
+        await SaveWorkflowStateAsync();
     }
 
-    private void RequestPlanChanges()
+    private async Task RequestPlanChanges()
     {
         if (_plan is null || string.IsNullOrWhiteSpace(_planComment)) { Toasts.Warning("Add your feedback first."); return; }
         _plan.Status = PlanStatus.ChangesRequested;
         _plan.Comments.Add(new PlanComment(DateTimeOffset.UtcNow, "You", PlanCommentType.ChangeRequest, _planComment));
         _workflow.Steps[PipelineStep.Plan] = StepStatus.Warning;
         _planComment = string.Empty;
+        await SaveWorkflowStateAsync();
     }
 
     private void AddPlanTask()
@@ -440,13 +450,14 @@ else
         }
     }
 
-    private void RejectPlan()
+    private async Task RejectPlan()
     {
         if (_plan is null) return;
         _plan.Status = PlanStatus.Rejected;
         _plan.Comments.Add(new PlanComment(DateTimeOffset.UtcNow, "You", PlanCommentType.Rejection, string.IsNullOrWhiteSpace(_planComment) ? "Rejected." : _planComment));
         _workflow.Steps[PipelineStep.Plan] = StepStatus.Failed;
         _planComment = string.Empty;
+        await SaveWorkflowStateAsync();
     }
 
     // ── Implement Step ──────────────────────────────────────────────────
@@ -554,10 +565,11 @@ else
         }
     }
 
-    private void MarkImplementDone()
+    private async Task MarkImplementDone()
     {
         _workflow.Steps[PipelineStep.Implement] = StepStatus.Passed;
         _activeStep = PipelineStep.Validate;
+        await SaveWorkflowStateAsync();
     }
 
     // ── Validate Step — test config CRUD + runners ──────────────────────
@@ -594,6 +606,95 @@ else
         }
     }
 
+    private static readonly JsonSerializerOptions _jsonOpts = new(JsonSerializerDefaults.Web) { WriteIndented = false };
+
+    private void LoadWorkflowState()
+    {
+        if (_workspace?.WorkflowStateJson is not null)
+        {
+            try
+            {
+                var loaded = JsonSerializer.Deserialize<WorkflowStatePersist>(_workspace.WorkflowStateJson, _jsonOpts);
+                if (loaded is not null)
+                {
+                    if (loaded.Steps is not null)
+                    {
+                        foreach (var (step, status) in loaded.Steps)
+                            _workflow.Steps[step] = status;
+                    }
+                    _analysis = loaded.Analysis;
+                    _workflow.Analysis = _analysis;
+                    _plan = loaded.Plan;
+                    _workflow.Plan = _plan;
+                    _activeStep = loaded.ActiveStep;
+                }
+            }
+            catch { /* corrupt JSON — start fresh */ }
+        }
+    }
+
+    private async Task SaveWorkflowStateAsync()
+    {
+        if (_workspace is null) return;
+        try
+        {
+            var persist = new WorkflowStatePersist
+            {
+                Steps = _workflow.Steps,
+                Analysis = _analysis,
+                Plan = _plan,
+                ActiveStep = _activeStep
+            };
+            var json = JsonSerializer.Serialize(persist, _jsonOpts);
+
+            // Update directly via DB to avoid EF tracking issues
+            await Db.Database.ExecuteSqlRawAsync(
+                """UPDATE "Workspaces" SET "WorkflowStateJson" = {0} WHERE "TicketKey" = {1}""",
+                json, _workspace.TicketKey);
+        }
+        catch { /* best-effort persistence */ }
+    }
+
+    private class WorkflowStatePersist
+    {
+        public Dictionary<PipelineStep, StepStatus>? Steps { get; set; }
+        public TicketAnalysis? Analysis { get; set; }
+        public ImplementationPlan? Plan { get; set; }
+        public PipelineStep ActiveStep { get; set; }
+    }
+
+    private static List<string> GetCommands(RepoTestConfig config) =>
+        (config.Command ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    private static void SetCommands(RepoTestConfig config, List<string> commands) =>
+        config.Command = string.Join('\n', commands);
+
+    private void AddCommand(RepoTestConfig config)
+    {
+        var cmds = GetCommands(config);
+        cmds.Add("");
+        SetCommands(config, cmds);
+    }
+
+    private void UpdateCommand(RepoTestConfig config, int index, string value)
+    {
+        var cmds = GetCommands(config);
+        if (index >= 0 && index < cmds.Count) cmds[index] = value;
+        SetCommands(config, cmds);
+    }
+
+    private void RemoveCommand(RepoTestConfig config, int index)
+    {
+        var cmds = GetCommands(config);
+        if (index >= 0 && index < cmds.Count) cmds.RemoveAt(index);
+        SetCommands(config, cmds);
+    }
+
+    private void ToggleEditTest(int configId)
+    {
+        _editingTestId = _editingTestId == configId ? null : configId;
+    }
+
     private void AddTestConfig(string repoName)
     {
         var nextOrder = _testConfigs.Where(c => c.RepositoryName == repoName).Select(c => c.Order).DefaultIfEmpty(0).Max() + 1;
@@ -607,6 +708,7 @@ else
         Db.RepoTestConfigs.Add(config);
         Db.SaveChanges();
         _testConfigs.Add(config);
+        _editingTestId = config.Id; // auto-open edit form for new entries
     }
 
     private async void SaveTestConfigAsync(RepoTestConfig config)
@@ -630,24 +732,40 @@ else
     private async Task RunSingleTestAsync(RepoTestConfig config)
     {
         if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return; }
+        var commands = GetCommands(config);
+        if (commands.Count == 0) { Toasts.Warning("Add at least one command."); return; }
         _runningTests = true;
         await InvokeAsync(StateHasChanged);
         try
         {
-            var cmd = string.IsNullOrEmpty(config.WorkingDir)
-                ? config.Command
-                : $"cd /workspace/{config.RepositoryName}/{config.WorkingDir} && {config.Command}";
+            var workDir = string.IsNullOrWhiteSpace(config.WorkingDir)
+                ? $"/workspace/{config.RepositoryName}"
+                : $"/workspace/{config.RepositoryName}/{config.WorkingDir.Trim('/')}";
 
-            var exitCode = await Docker.ExecAsync(_workspace.ContainerId,
-                new[] { "sh", "-c", $"cd /workspace/{config.RepositoryName} && {config.Command}" }, default);
+            var output = new System.Text.StringBuilder();
+            var lastExitCode = 0;
+            var allPassed = true;
 
-            var result = new SingleTestResult(config.Name, config.Command, config.WorkingDir,
-                config.RepositoryName, exitCode, exitCode == 0,
-                exitCode == 0 ? "Passed." : $"Failed with exit code {exitCode}.");
+            foreach (var cmd in commands)
+            {
+                if (string.IsNullOrWhiteSpace(cmd)) continue;
+                output.AppendLine($"$ {cmd}");
+                var exitCode = await Docker.ExecAsync(_workspace.ContainerId,
+                    new[] { "sh", "-c", $"cd {workDir} && {cmd}" }, default);
+                lastExitCode = exitCode;
+                if (exitCode != 0)
+                {
+                    output.AppendLine($"✗ exit {exitCode}");
+                    allPassed = false;
+                    break; // stop on first failure
+                }
+                output.AppendLine("✓ ok");
+            }
 
             _suiteResult ??= new TestSuiteResult();
             _suiteResult.Results.RemoveAll(r => r.ConfigName == config.Name && r.RepositoryName == config.RepositoryName);
-            _suiteResult.Results.Add(result);
+            _suiteResult.Results.Add(new SingleTestResult(config.Name, string.Join(" && ", commands), config.WorkingDir,
+                config.RepositoryName, lastExitCode, allPassed, output.ToString()));
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
         finally { _runningTests = false; await InvokeAsync(StateHasChanged); }
@@ -664,11 +782,29 @@ else
         {
             foreach (var config in _testConfigs)
             {
-                var exitCode = await Docker.ExecAsync(_workspace.ContainerId,
-                    new[] { "sh", "-c", $"cd /workspace/{config.RepositoryName} && {config.Command}" }, default);
-                _suiteResult.Results.Add(new SingleTestResult(config.Name, config.Command, config.WorkingDir,
-                    config.RepositoryName, exitCode, exitCode == 0,
-                    exitCode == 0 ? "Passed." : $"Failed with exit code {exitCode}."));
+                var commands = GetCommands(config);
+                if (commands.Count == 0) continue;
+                var workDir = string.IsNullOrWhiteSpace(config.WorkingDir)
+                    ? $"/workspace/{config.RepositoryName}"
+                    : $"/workspace/{config.RepositoryName}/{config.WorkingDir.Trim('/')}";
+
+                var output = new System.Text.StringBuilder();
+                var lastExitCode = 0;
+                var allPassed = true;
+
+                foreach (var cmd in commands)
+                {
+                    if (string.IsNullOrWhiteSpace(cmd)) continue;
+                    output.AppendLine($"$ {cmd}");
+                    var exitCode = await Docker.ExecAsync(_workspace.ContainerId,
+                        new[] { "sh", "-c", $"cd {workDir} && {cmd}" }, default);
+                    lastExitCode = exitCode;
+                    if (exitCode != 0) { output.AppendLine($"✗ exit {exitCode}"); allPassed = false; break; }
+                    output.AppendLine("✓ ok");
+                }
+
+                _suiteResult.Results.Add(new SingleTestResult(config.Name, string.Join(" && ", commands), config.WorkingDir,
+                    config.RepositoryName, lastExitCode, allPassed, output.ToString()));
                 await InvokeAsync(StateHasChanged);
             }
             _workflow.Steps[PipelineStep.Validate] = _suiteResult.AllPassed ? StepStatus.Passed : StepStatus.Failed;
@@ -686,7 +822,6 @@ else
     {
         <h3 class="text-sm font-semibold mb-4">Validate (Tests)</h3>
 
-        <!-- Test configurations per repo -->
         @if (_workspace?.Links is not null)
         {
             @foreach (var link in _workspace.Links)
@@ -694,61 +829,130 @@ else
                 var repoName = link.RepositoryName;
                 var configs = _testConfigs.Where(c => c.RepositoryName == repoName).OrderBy(c => c.Order).ToList();
 
-                <div class="mb-4">
-                    <div class="flex items-center justify-between mb-2">
-                        <h4 class="text-xs uppercase tracking-wider text-zinc-500">@repoName</h4>
+                <div class="mb-6">
+                    <div class="flex items-center justify-between mb-3">
+                        <h4 class="text-xs uppercase tracking-wider text-zinc-500 font-semibold">@repoName</h4>
                         <button type="button" @onclick="@(() => AddTestConfig(repoName))"
-                                class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1">
+                                class="inline-flex items-center gap-1.5 h-7 px-3 rounded-md text-xs text-zinc-400 hover:text-zinc-100 border border-zinc-800 hover:bg-zinc-800/60 transition-colors">
                             <Icon Name="plus" Class="w-3 h-3" /> Add test
                         </button>
                     </div>
 
                     @if (configs.Count == 0)
                     {
-                        <div class="text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-md px-3 py-2">
-                            No tests configured. Click "Add test" to define a command.
+                        <div class="text-xs text-zinc-500 border border-dashed border-zinc-800 rounded-lg px-4 py-6 text-center">
+                            No tests configured for this repo. Add one to validate your changes.
                         </div>
                     }
                     else
                     {
-                        <div class="rounded-md border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800/80">
+                        <div class="space-y-3">
                             @foreach (var config in configs)
                             {
                                 var result = _suiteResult?.Results.FirstOrDefault(r => r.ConfigName == config.Name && r.RepositoryName == repoName);
-                                <div class="px-3 py-2.5 group">
-                                    <div class="flex items-center gap-2 mb-1">
+                                <div class="rounded-lg border @(result is null ? "border-zinc-800" : result.Passed ? "border-emerald-900/60" : "border-red-900/60") bg-zinc-950/60 p-4">
+                                    <!-- Header: status + name + actions -->
+                                    <div class="flex items-center gap-3 mb-3">
                                         @if (result is not null)
                                         {
-                                            <Icon Name="@(result.Passed ? "check" : "alert")" Class="@($"w-4 h-4 {(result.Passed ? "text-emerald-400" : "text-red-400")} flex-shrink-0")" />
+                                            <div class="w-6 h-6 rounded-full flex items-center justify-center @(result.Passed ? "bg-emerald-500/15" : "bg-red-500/15")">
+                                                <Icon Name="@(result.Passed ? "check" : "x")" Class="@($"w-3.5 h-3.5 {(result.Passed ? "text-emerald-400" : "text-red-400")}")" />
+                                            </div>
                                         }
-                                        <input value="@config.Name" @onchange="@(e => { config.Name = (string?)e.Value ?? ""; SaveTestConfigAsync(config); })"
-                                               placeholder="Test name"
-                                               class="bg-transparent border-none text-sm font-medium text-zinc-200 flex-1 min-w-0 focus:outline-none placeholder:text-zinc-600" />
+                                        else
+                                        {
+                                            <div class="w-6 h-6 rounded-full bg-zinc-800 flex items-center justify-center">
+                                                <span class="text-zinc-500 text-[10px] font-bold">@(configs.IndexOf(config) + 1)</span>
+                                            </div>
+                                        }
+                                        <span class="text-sm font-semibold text-zinc-200 flex-1">@config.Name</span>
                                         <button type="button" @onclick="@(() => RunSingleTestAsync(config))"
-                                                disabled="@(_runningTests)"
-                                                class="p-1 rounded text-zinc-500 hover:text-emerald-300 hover:bg-zinc-800 transition-colors opacity-0 group-hover:opacity-100 disabled:opacity-40"
-                                                title="Run this test">
-                                            <Icon Name="play" Class="w-3.5 h-3.5" />
+                                                disabled="@_runningTests"
+                                                class="inline-flex items-center gap-1 h-7 px-2.5 rounded-md text-xs text-zinc-400 hover:text-emerald-300 border border-zinc-800 hover:border-emerald-900/60 hover:bg-emerald-950/20 transition-colors disabled:opacity-40">
+                                            <Icon Name="play" Class="w-3 h-3" /> Run
                                         </button>
-                                        <button type="button" @onclick="@(() => RemoveTestConfig(config))"
-                                                class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
-                                                title="Remove">
-                                            <Icon Name="x" Class="w-3.5 h-3.5" />
+                                        <button type="button" @onclick="@(() => ToggleEditTest(config.Id))"
+                                                class="p-1.5 rounded-md text-zinc-600 hover:text-zinc-300 hover:bg-zinc-800 transition-colors">
+                                            <Icon Name="settings" Class="w-3.5 h-3.5" />
                                         </button>
                                     </div>
-                                    <div class="flex items-center gap-2 ml-6">
-                                        <code class="text-[10px] text-zinc-500">$</code>
-                                        <input value="@config.Command" @onchange="@(e => { config.Command = (string?)e.Value ?? ""; SaveTestConfigAsync(config); })"
-                                               placeholder="npm test"
-                                               class="bg-transparent border-none text-xs font-mono text-zinc-400 flex-1 min-w-0 focus:outline-none placeholder:text-zinc-600" />
+
+                                    <!-- Summary line(s) -->
+                                    <div class="ml-9 space-y-0.5">
                                         @if (!string.IsNullOrEmpty(config.WorkingDir))
                                         {
-                                            <span class="text-[10px] text-zinc-600">in @config.WorkingDir</span>
+                                            <div class="text-[10px] text-zinc-600 font-mono">in @config.WorkingDir/</div>
+                                        }
+                                        @foreach (var cmd in GetCommands(config))
+                                        {
+                                            <div class="flex items-center gap-1.5 text-xs font-mono">
+                                                <span class="text-zinc-600">$</span>
+                                                <span class="text-zinc-400">@cmd</span>
+                                            </div>
                                         }
                                     </div>
-                                    @if (result is not null && !string.IsNullOrWhiteSpace(result.Output))
+
+                                    <!-- Edit form (toggle) -->
+                                    @if (_editingTestId == config.Id)
                                     {
-                                        <pre class="mt-2 ml-6 text-[11px] text-zinc-500 bg-zinc-950 border border-zinc-800/60 rounded px-2 py-1.5 max-h-32 overflow-y-auto whitespace-pre-wrap">@result.Output</pre>
+                                        var commands = GetCommands(config);
+                                        <div class="mt-3 ml-9 space-y-2 pt-3 border-t border-zinc-800/80">
+                                            <div>
+                                                <label class="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Name</label>
+                                                <input value="@config.Name" @onchange="@(e => { config.Name = (string?)e.Value ?? ""; })"
+                                                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-2.5 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition-colors" />
+                                            </div>
+                                            <div>
+                                                <label class="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Working directory <span class="text-zinc-700">(relative to repo root)</span></label>
+                                                <input value="@config.WorkingDir" @onchange="@(e => { config.WorkingDir = string.IsNullOrWhiteSpace((string?)e.Value) ? null : ((string)e.Value!).Trim(); })"
+                                                       placeholder="e.g. apps/backend  (leave empty for repo root)"
+                                                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-2.5 py-1.5 text-sm font-mono placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition-colors" />
+                                            </div>
+                                            <div>
+                                                <label class="block text-[10px] uppercase tracking-wider text-zinc-500 mb-1">Commands</label>
+                                                <div class="space-y-1.5">
+                                                    @for (var ci = 0; ci < commands.Count; ci++)
+                                                    {
+                                                        var cmdIdx = ci;
+                                                        <div class="flex items-center gap-1.5 group/cmd">
+                                                            <span class="text-zinc-700 text-[10px] font-mono w-4 text-right">@(cmdIdx + 1).</span>
+                                                            <input value="@commands[cmdIdx]"
+                                                                   @onchange="@(e => UpdateCommand(config, cmdIdx, (string?)e.Value ?? ""))"
+                                                                   placeholder="e.g. npm install"
+                                                                   class="flex-1 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 text-xs font-mono placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 transition-colors" />
+                                                            @if (commands.Count > 1)
+                                                            {
+                                                                <button type="button" @onclick="@(() => RemoveCommand(config, cmdIdx))"
+                                                                        class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover/cmd:opacity-100 transition-all">
+                                                                    <Icon Name="x" Class="w-3 h-3" />
+                                                                </button>
+                                                            }
+                                                        </div>
+                                                    }
+                                                </div>
+                                                <button type="button" @onclick="@(() => { AddCommand(config); InvokeAsync(StateHasChanged); })"
+                                                        class="mt-2 w-full flex items-center justify-center gap-1.5 h-8 rounded border border-dashed border-zinc-700 text-xs text-zinc-500 hover:text-zinc-200 hover:border-zinc-500 transition-colors">
+                                                    <Icon Name="plus" Class="w-3 h-3" /> Add command
+                                                </button>
+                                                <p class="text-[10px] text-zinc-600 mt-1.5">Each command runs sequentially. If one fails, the rest are skipped.</p>
+                                            </div>
+                                            <div class="flex gap-2 pt-1">
+                                                <button type="button" @onclick="@(() => { SaveTestConfigAsync(config); _editingTestId = null; })"
+                                                        class="inline-flex items-center gap-1 h-7 px-3 rounded-md text-xs bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium transition-colors">
+                                                    <Icon Name="check" Class="w-3 h-3" /> Save
+                                                </button>
+                                                <button type="button" @onclick="@(() => RemoveTestConfig(config))"
+                                                        class="inline-flex items-center gap-1 h-7 px-3 rounded-md text-xs border border-red-900/70 text-red-300 hover:bg-red-950/40 transition-colors">
+                                                    <Icon Name="trash" Class="w-3 h-3" /> Remove
+                                                </button>
+                                            </div>
+                                        </div>
+                                    }
+
+                                    <!-- Result output -->
+                                    @if (result is not null && !string.IsNullOrWhiteSpace(result.Output) && result.Output != "Passed.")
+                                    {
+                                        <pre class="mt-3 ml-9 text-[11px] text-zinc-500 bg-zinc-950 border border-zinc-800/60 rounded-md px-3 py-2 max-h-40 overflow-y-auto whitespace-pre-wrap">@result.Output</pre>
                                     }
                                 </div>
                             }
@@ -765,11 +969,11 @@ else
             </div>
         }
 
-        <div class="flex gap-2 pt-2">
+        <div class="flex gap-2 pt-3 border-t border-zinc-800/80">
             <button type="button" @onclick="RunAllTestsAsync" disabled="@(_runningTests || _testConfigs.Count == 0)"
                     class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50">
-                @if (_runningTests) { <Spinner /> <span>Running…</span> }
-                else { <Icon Name="play" Class="w-4 h-4" /> <span>Run all tests</span> }
+                @if (_runningTests) { <Spinner /> <span>Running all…</span> }
+                else { <Icon Name="play" Class="w-4 h-4" /> <span>Run all tests (@_testConfigs.Count)</span> }
             </button>
         </div>
     };

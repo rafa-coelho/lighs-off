@@ -18,4 +18,7 @@ public class Workspace
     public WorkspaceStatus Status { get; set; } = WorkspaceStatus.Created;
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<TicketRepositoryLink> Links { get; set; } = new();
+
+    /// <summary>Serialized WorkflowState JSON — persists pipeline progress across page reloads.</summary>
+    public string? WorkflowStateJson { get; set; }
 }

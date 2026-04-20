@@ -57,5 +57,27 @@ public static class DependencyInjection
         await using var scope = serviceProvider.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         await db.Database.EnsureCreatedAsync(ct).ConfigureAwait(false);
+
+        // Patch: add tables that were introduced after the initial EnsureCreated.
+        // EnsureCreated won't add new tables to an existing DB — this covers schema evolution
+        // without requiring full EF Core migrations for a personal tool.
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "RepoTestConfigs" (
+                "Id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                "RepositoryName" TEXT NOT NULL,
+                "Name" TEXT NOT NULL,
+                "Command" TEXT NOT NULL,
+                "WorkingDir" TEXT,
+                "Order" INTEGER NOT NULL
+            )
+            """, ct).ConfigureAwait(false);
+
+        // Add WorkflowStateJson column to Workspaces if missing (schema evolution)
+        try
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                """ALTER TABLE "Workspaces" ADD COLUMN "WorkflowStateJson" TEXT""", ct).ConfigureAwait(false);
+        }
+        catch { /* column already exists — SQLite throws on duplicate ALTER, safe to ignore */ }
     }
 }
