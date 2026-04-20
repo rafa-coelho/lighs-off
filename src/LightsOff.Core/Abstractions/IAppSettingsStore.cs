@@ -18,4 +18,10 @@ public static class AppSettingsKeys
     /// When empty, Browse falls back to <c>/search/repositories?q=is:private</c> (token-scoped private only, no config required).
     /// </summary>
     public const string GitHubOrgs = "github.orgs";
+
+    /// <summary>
+    /// ID of the default code agent. <c>"local"</c> = file-system + rules (always available).
+    /// <c>"claude"</c>, <c>"qwen"</c>, etc. = AI agents requiring an API key.
+    /// </summary>
+    public const string DefaultAgent = "agent.default";
 }

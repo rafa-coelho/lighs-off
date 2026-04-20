@@ -2,6 +2,7 @@ using LightsOff.Core.Abstractions;
 using LightsOff.Core.Configuration;
 using LightsOff.Infrastructure.Configuration;
 using LightsOff.Infrastructure.Data;
+using LightsOff.Infrastructure.Agents;
 using LightsOff.Infrastructure.Docker;
 using LightsOff.Infrastructure.Git;
 using LightsOff.Infrastructure.GitHub;
@@ -42,6 +43,8 @@ public static class DependencyInjection
         services.AddSingleton<IDockerService, DockerService>();
         services.AddScoped<IRepositoryRegistry, RepositoryRegistry>();
         services.AddSingleton<Workspaces.RepoConfigLoader>();
+        services.AddSingleton<ICodeAgent, LocalCodeAgent>();
+        services.AddSingleton<ICodeAgentProvider, CodeAgentProvider>();
         services.AddScoped<IWorkspaceManager, WorkspaceManager>();
 
         return services;

@@ -98,13 +98,19 @@ public class JiraClient : IJiraClient
         }
     }
 
-    private static Ticket MapIssue(IssueDto issue, string baseUrl) => new(
-        issue.Key,
-        issue.Fields?.Summary ?? string.Empty,
-        issue.Fields?.Status?.Name ?? "Unknown",
-        issue.Fields?.Assignee?.DisplayName,
-        issue.Fields?.IssueType?.Name ?? "Task",
-        $"{baseUrl}/browse/{issue.Key}");
+    private static Ticket MapIssue(IssueDto issue, string baseUrl) => new()
+    {
+        Key = issue.Key,
+        Summary = issue.Fields?.Summary ?? string.Empty,
+        Status = issue.Fields?.Status?.Name ?? "Unknown",
+        Assignee = issue.Fields?.Assignee?.DisplayName,
+        Type = issue.Fields?.IssueType?.Name ?? "Task",
+        Url = $"{baseUrl}/browse/{issue.Key}",
+        Description = issue.RenderedFields?.Description,
+        StoryPoints = issue.Fields?.StoryPoints,
+        Labels = issue.Fields?.Labels ?? new(),
+        Components = issue.Fields?.Components?.Select(c => c.Name ?? "").Where(n => n.Length > 0).ToList() ?? new(),
+    };
 
     private async Task<HttpClient> CreateConfiguredClientAsync(CancellationToken ct)
     {
@@ -153,6 +159,7 @@ public class JiraClient : IJiraClient
     {
         [JsonPropertyName("key")] public string Key { get; set; } = string.Empty;
         [JsonPropertyName("fields")] public IssueFieldsDto? Fields { get; set; }
+        [JsonPropertyName("renderedFields")] public RenderedFieldsDto? RenderedFields { get; set; }
     }
 
     private sealed class IssueFieldsDto
@@ -161,6 +168,15 @@ public class JiraClient : IJiraClient
         [JsonPropertyName("status")] public NamedDto? Status { get; set; }
         [JsonPropertyName("assignee")] public AssigneeDto? Assignee { get; set; }
         [JsonPropertyName("issuetype")] public NamedDto? IssueType { get; set; }
+        [JsonPropertyName("description")] public object? Description { get; set; }
+        [JsonPropertyName("story_points")] public double? StoryPoints { get; set; }
+        [JsonPropertyName("labels")] public List<string>? Labels { get; set; }
+        [JsonPropertyName("components")] public List<NamedDto>? Components { get; set; }
+    }
+
+    private sealed class RenderedFieldsDto
+    {
+        [JsonPropertyName("description")] public string? Description { get; set; }
     }
 
     private sealed class NamedDto
