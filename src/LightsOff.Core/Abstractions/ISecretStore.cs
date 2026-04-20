@@ -4,6 +4,7 @@ public static class SecretKeys
 {
     public const string JiraApiToken = "jira.apiToken";
     public const string GitHubPat = "github.pat";
+    public const string ClaudeApiKey = "claude.apiKey";
 }
 
 public interface ISecretStore

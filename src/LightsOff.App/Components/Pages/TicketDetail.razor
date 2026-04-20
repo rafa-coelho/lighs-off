@@ -7,7 +7,9 @@
 @inject IGitHubClient GitHub
 @inject IRepositoryRegistry Registry
 @inject IWorkspaceManager Workspaces
+@inject ICodeAgentProvider AgentProvider
 @inject IDockerService Docker
+@inject IGitService Git
 @inject IOptions<LightsOffOptions> OptionsAccessor
 @inject ToastService Toasts
 @inject NavigationManager Nav
@@ -17,26 +19,23 @@
 
 <nav class="flex items-center gap-2 text-sm text-zinc-500 mb-4">
     <a href="/tickets" class="hover:text-zinc-200 inline-flex items-center gap-1.5">
-        <Icon Name="arrow-left" Class="w-4 h-4" />
-        Tickets
+        <Icon Name="arrow-left" Class="w-4 h-4" /> Tickets
     </a>
     <span class="text-zinc-700">/</span>
     <span class="text-zinc-300"><code>@TicketKey</code></span>
 </nav>
 
-@if (_state == LoadState.NotConfigured)
+@if (_loadState == LoadState.NotConfigured)
 {
-    <Alert Kind="Alert.AlertKind.Warning">
-        Jira is not configured. <a href="/settings" class="text-amber-100 underline underline-offset-2">Open settings</a>.
-    </Alert>
+    <Alert Kind="Alert.AlertKind.Warning">Jira is not configured. <a href="/settings" class="text-amber-100 underline underline-offset-2">Open settings</a>.</Alert>
 }
-else if (_state == LoadState.NotFound)
+else if (_loadState == LoadState.NotFound)
 {
-    <Alert Kind="Alert.AlertKind.Warning">Ticket <code>@TicketKey</code> not found in the configured Jira site.</Alert>
+    <Alert Kind="Alert.AlertKind.Warning">Ticket <code>@TicketKey</code> not found.</Alert>
 }
-else if (_state == LoadState.Error)
+else if (_loadState == LoadState.Error)
 {
-    <Alert Kind="Alert.AlertKind.Error">@_error</Alert>
+    <Alert Kind="Alert.AlertKind.Error">@_loadError</Alert>
 }
 else if (_ticket is null)
 {
@@ -44,259 +43,55 @@ else if (_ticket is null)
 }
 else
 {
+    <!-- Ticket header -->
     <div class="mb-6">
         <div class="flex items-start gap-3 mb-2">
             <code class="text-xl font-semibold text-emerald-400">@_ticket.Key</code>
-            <span class="@StatusBadgeClasses(_ticket.Status) mt-1.5">@_ticket.Status</span>
+            <span class="@StatusBadge(_ticket.Status) mt-1.5">@_ticket.Status</span>
         </div>
         <h1 class="text-2xl font-semibold tracking-tight">@_ticket.Summary</h1>
+        @if (!string.IsNullOrEmpty(_ticket.Description))
+        {
+            <div class="mt-3 text-sm text-zinc-400 prose prose-invert prose-sm max-w-none max-h-32 overflow-y-auto border border-zinc-800/80 rounded-lg p-3 bg-zinc-950/40">
+                @((MarkupString)(_ticket.Description ?? ""))
+            </div>
+        }
     </div>
 
-    <div class="grid lg:grid-cols-3 gap-5">
-        <!-- Left: ticket metadata -->
-        <section class="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-6">
-            <h2 class="text-sm font-semibold mb-4">Details</h2>
-            <dl class="space-y-3 text-sm">
-                <div>
-                    <dt class="text-xs uppercase tracking-wider text-zinc-500">Type</dt>
-                    <dd class="text-zinc-200 mt-0.5">@_ticket.Type</dd>
-                </div>
-                <div>
-                    <dt class="text-xs uppercase tracking-wider text-zinc-500">Assignee</dt>
-                    <dd class="text-zinc-200 mt-0.5">@(_ticket.Assignee ?? "Unassigned")</dd>
-                </div>
-                <div class="pt-2">
-                    <a href="@_ticket.Url" target="_blank" rel="noopener"
-                       class="inline-flex items-center gap-1.5 text-emerald-400 hover:text-emerald-300 text-sm">
-                        Open in Jira
-                        <Icon Name="external" Class="w-4 h-4" />
-                    </a>
-                </div>
-            </dl>
-        </section>
+    @if (_workspace is not null)
+    {
+        <!-- Pipeline view -->
+        <PipelineStepper State="_workflow" ActiveStep="_activeStep" OnStepClick="SetActiveStep" />
 
-        <!-- Right: workspace -->
-        <section class="lg:col-span-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-6">
-            @if (_existingWorkspace is not null)
+        <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-6">
+            @switch (_activeStep)
             {
-                <div class="flex items-start justify-between mb-4 gap-3">
-                    <div>
-                        <h2 class="text-sm font-semibold">Workspace</h2>
-                        <p class="text-xs text-zinc-500 mt-0.5">Created @_existingWorkspace.CreatedAt.ToLocalTime().ToString("g")</p>
-                    </div>
-                    <span class="@WorkspaceStatusBadge(_existingWorkspace.Status)">@_existingWorkspace.Status</span>
-                </div>
-
-                <dl class="space-y-3 text-sm mb-5">
-                    <div>
-                        <dt class="text-xs uppercase tracking-wider text-zinc-500">Repositories</dt>
-                        <dd class="mt-1 flex flex-wrap gap-1">
-                            @foreach (var link in _existingWorkspace.Links)
-                            {
-                                <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-zinc-800 text-zinc-300 border border-zinc-700">
-                                    @link.RepositoryName
-                                    <span class="text-zinc-500">·</span>
-                                    <code class="text-zinc-400">@link.BranchName</code>
-                                </span>
-                            }
-                        </dd>
-                    </div>
-                    <div>
-                        <dt class="text-xs uppercase tracking-wider text-zinc-500">Root path</dt>
-                        <dd class="text-zinc-300 mt-0.5 font-mono text-xs">@_existingWorkspace.RootPath</dd>
-                    </div>
-                    @if (!string.IsNullOrEmpty(_existingWorkspace.ContainerName))
-                    {
-                        <div>
-                            <dt class="text-xs uppercase tracking-wider text-zinc-500">Container</dt>
-                            <dd class="text-zinc-300 mt-0.5 font-mono text-xs">@_existingWorkspace.ContainerName</dd>
-                        </div>
-                        <div>
-                            <dt class="text-xs uppercase tracking-wider text-zinc-500">Attach</dt>
-                            <dd class="mt-1 flex items-center gap-2">
-                                <code class="flex-1 text-xs font-mono text-emerald-300 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 truncate">
-                                    docker exec -it @_existingWorkspace.ContainerName bash
-                                </code>
-                                <button type="button" @onclick="CopyAttachCommandAsync"
-                                        class="p-1.5 rounded-md text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors"
-                                        title="Copy">
-                                    <Icon Name="copy" Class="w-4 h-4" />
-                                </button>
-                            </dd>
-                        </div>
-                    }
-                </dl>
-
-                @if (_submitResults is { Count: > 0 })
-                {
-                    <div class="rounded-lg border border-zinc-800 bg-zinc-950/40 divide-y divide-zinc-800/60 mb-4 overflow-hidden">
-                        @foreach (var result in _submitResults)
-                        {
-                            <div class="px-4 py-2.5 flex items-center gap-3 text-sm">
-                                @if (result.Url is not null)
-                                {
-                                    <Icon Name="check" Class="w-4 h-4 text-emerald-400 flex-shrink-0" />
-                                    <span class="font-medium">@result.RepositoryName</span>
-                                    <span class="text-zinc-600">·</span>
-                                    <a href="@result.Url" target="_blank" rel="noopener"
-                                       class="text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-1 truncate">
-                                        @result.Url <Icon Name="external" Class="w-3.5 h-3.5" />
-                                    </a>
-                                }
-                                else
-                                {
-                                    <Icon Name="alert" Class="w-4 h-4 text-red-400 flex-shrink-0" />
-                                    <span class="font-medium">@result.RepositoryName</span>
-                                    <span class="text-zinc-600">·</span>
-                                    <span class="text-red-300 text-xs truncate">@result.Error</span>
-                                }
-                            </div>
-                        }
-                    </div>
-                }
-
-                <div class="flex gap-2 pt-2 border-t border-zinc-800/80">
-                    <button type="button" @onclick="SubmitWorkspaceAsync" disabled="@_submitting"
-                            class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                        @if (_submitting) { <Spinner /> <span>Pushing &amp; opening PRs…</span> }
-                        else { <Icon Name="external" Class="w-4 h-4" /> <span>Submit PRs</span> }
-                    </button>
-                    <a href="/workspaces"
-                       class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-100 text-sm font-medium transition-colors">
-                        <Icon Name="terminal" Class="w-4 h-4" />
-                        All workspaces
-                    </a>
-                    <button type="button" @onclick="DestroyWorkspaceAsync" disabled="@_destroying"
-                            class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-red-900/70 hover:bg-red-950/40 text-red-300 text-sm font-medium transition-colors disabled:opacity-50">
-                        @if (_destroying) { <Spinner /> <span>Destroying…</span> }
-                        else { <Icon Name="trash" Class="w-4 h-4" /> <span>Destroy workspace</span> }
-                    </button>
-                </div>
+                case PipelineStep.Analyze:
+                    @RenderAnalyzeStep()
+                    break;
+                case PipelineStep.Plan:
+                    @RenderPlanStep()
+                    break;
+                case PipelineStep.Implement:
+                    @RenderImplementStep()
+                    break;
+                case PipelineStep.Validate:
+                    @RenderValidateStep()
+                    break;
+                case PipelineStep.Review:
+                    @RenderReviewStep()
+                    break;
+                case PipelineStep.Submit:
+                    @RenderSubmitStep()
+                    break;
             }
-            else
-            {
-                <div class="flex items-center justify-between mb-5">
-                    <div>
-                        <h2 class="text-sm font-semibold">Create workspace</h2>
-                        <p class="text-xs text-zinc-500 mt-0.5">Pick repos from your GitHub, then clone + branch + container in one shot.</p>
-                    </div>
-                    <button type="button" @onclick="LoadGitHubReposAsync" disabled="@_loadingRepos"
-                            class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1 disabled:opacity-40">
-                        @if (_loadingRepos) { <Spinner Class="w-3 h-3" /> }
-                        else { <Icon Name="refresh" Class="w-3 h-3" /> }
-                        <span>@(_loadingRepos ? "Loading" : "Refresh")</span>
-                    </button>
-                </div>
-
-                <!-- Repo search + list (GitHub-backed) -->
-                <div class="mb-4">
-                    <div class="relative mb-2">
-                        <div class="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600">
-                            <Icon Name="search" Class="w-4 h-4" />
-                        </div>
-                        <input @bind="_query" @bind:event="oninput"
-                               placeholder="Filter by owner, name, or description…"
-                               class="w-full bg-zinc-950 border border-zinc-800 rounded-md pl-9 pr-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
-                    </div>
-
-                    @if (_loadingRepos)
-                    {
-                        <div class="flex items-center gap-3 text-sm text-zinc-500 py-6 justify-center border border-zinc-800 rounded-md bg-zinc-950/60">
-                            <Spinner /> Fetching repositories…
-                        </div>
-                    }
-                    else if (_reposError is not null)
-                    {
-                        <Alert Kind="Alert.AlertKind.Error">@_reposError</Alert>
-                    }
-                    else if (_githubRepos is null or { Count: 0 })
-                    {
-                        <Alert Kind="Alert.AlertKind.Info">
-                            No repositories visible to your token. Configure GitHub in <a href="/settings" class="text-sky-100 underline underline-offset-2">Settings</a>.
-                        </Alert>
-                    }
-                    else
-                    {
-                        <div class="rounded-md border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800/80 max-h-80 overflow-y-auto">
-                            @foreach (var repo in _filteredRepos)
-                            {
-                                var isSelected = _selectedRepoFullNames.Contains(repo.FullName);
-                                <label class="flex items-start gap-3 px-3 py-2.5 cursor-pointer hover:bg-zinc-900/60 transition-colors" @key="repo.FullName">
-                                    <input type="checkbox" checked="@isSelected"
-                                           @onchange="@(e => ToggleRepo(repo, (bool)e.Value!))"
-                                           class="mt-1 w-4 h-4 rounded border-zinc-700 bg-zinc-950 text-emerald-500 focus:ring-2 focus:ring-emerald-500/40 focus:ring-offset-0" />
-                                    <div class="flex-1 min-w-0">
-                                        <div class="flex items-center gap-2 flex-wrap">
-                                            <span class="text-sm font-medium text-zinc-100">
-                                                <span class="text-zinc-500">@repo.OwnerLogin/</span>@repo.Name
-                                            </span>
-                                            <code class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800/60 text-zinc-400 border border-zinc-700">@repo.DefaultBranch</code>
-                                            @if (repo.Private)
-                                            {
-                                                <span class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-semibold bg-zinc-800 text-zinc-400 border border-zinc-700 uppercase tracking-wider">private</span>
-                                            }
-                                        </div>
-                                        @if (!string.IsNullOrEmpty(repo.Description))
-                                        {
-                                            <div class="text-xs text-zinc-500 mt-0.5 truncate">@repo.Description</div>
-                                        }
-                                    </div>
-                                </label>
-                            }
-                        </div>
-                        <div class="text-xs text-zinc-500 mt-1.5">
-                            @_filteredRepos.Count of @_githubRepos.Count repos
-                            @if (_selectedRepoFullNames.Count > 0)
-                            {
-                                <span>· @_selectedRepoFullNames.Count selected</span>
-                            }
-                        </div>
-                    }
-                </div>
-
-                <!-- Branch name -->
-                <div class="mt-4">
-                    <label class="block text-xs font-medium text-zinc-400 mb-1.5">
-                        Branch name <span class="text-zinc-600">(created on every selected repo)</span>
-                    </label>
-                    <input @bind="_branchName" @bind:event="oninput"
-                           class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono text-xs" />
-                    <p class="text-xs text-zinc-500 mt-1.5">Default template: <code>@_options.BranchNameTemplate</code></p>
-                </div>
-
-                @if (_dockerAvailable == false)
-                {
-                    <div class="mt-4">
-                        <Alert Kind="Alert.AlertKind.Warning">
-                            Docker daemon not reachable. The workspace will still be created (clone + branch) but without a container. Start Docker and re-run to add one.
-                        </Alert>
-                    </div>
-                }
-
-                @if (!string.IsNullOrEmpty(_createError))
-                {
-                    <div class="mt-4"><Alert Kind="Alert.AlertKind.Error">@_createError</Alert></div>
-                }
-
-                <div class="flex gap-2 pt-5 mt-5 border-t border-zinc-800/80">
-                    <button type="button" @onclick="CreateWorkspaceAsync"
-                            disabled="@(_creating || _selectedRepoFullNames.Count == 0 || string.IsNullOrWhiteSpace(_branchName))"
-                            class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
-                        @if (_creating) { <Spinner /> <span>Creating…</span> }
-                        else
-                        {
-                            <Icon Name="play" Class="w-4 h-4" />
-                            <span>Create workspace</span>
-                            @if (_selectedRepoFullNames.Count > 0)
-                            {
-                                <span class="text-emerald-950/60 font-normal">· @_selectedRepoFullNames.Count repo@(_selectedRepoFullNames.Count == 1 ? "" : "s")</span>
-                            }
-                        }
-                    </button>
-                </div>
-            }
-        </section>
-    </div>
+        </div>
+    }
+    else
+    {
+        <!-- Workspace creation (same as before but condensed) -->
+        @RenderWorkspaceCreation()
+    }
 }
 
 @code {
@@ -306,40 +101,42 @@ else
 
     private LightsOffOptions _options = new();
     private Ticket? _ticket;
-    private LoadState _state = LoadState.Loading;
-    private string? _error;
-
-    private Workspace? _existingWorkspace;
+    private Workspace? _workspace;
+    private WorkflowState _workflow = new();
+    private PipelineStep _activeStep = PipelineStep.Analyze;
+    private LoadState _loadState = LoadState.Loading;
+    private string? _loadError;
     private bool? _dockerAvailable;
 
-    // GitHub browse state
+    // Analysis state
+    private TicketAnalysis? _analysis;
+    private bool _analyzing;
+
+    // Plan state
+    private ImplementationPlan? _plan;
+    private string _planComment = string.Empty;
+
+    // Validate state
+    private TestResult? _testResult;
+    private bool _runningTests;
+
+    // Review state
+    private CodeReview? _review;
+    private bool _reviewing;
+
+    // Submit state
+    private IReadOnlyList<PullRequestResult>? _submitResults;
+    private bool _submitting;
+
+    // Create workspace state
     private IReadOnlyList<GitHubRepo>? _githubRepos;
     private bool _loadingRepos;
     private string? _reposError;
     private string _query = string.Empty;
-    private readonly HashSet<string> _selectedRepoFullNames = new(StringComparer.OrdinalIgnoreCase);
-
+    private readonly HashSet<string> _selectedRepos = new(StringComparer.OrdinalIgnoreCase);
     private string _branchName = string.Empty;
-
     private bool _creating;
-    private bool _destroying;
-    private bool _submitting;
-    private IReadOnlyList<PullRequestResult>? _submitResults;
     private string? _createError;
-
-    private IReadOnlyList<GitHubRepo> _filteredRepos
-    {
-        get
-        {
-            if (_githubRepos is null) return Array.Empty<GitHubRepo>();
-            if (string.IsNullOrWhiteSpace(_query)) return _githubRepos;
-            var q = _query.Trim();
-            return _githubRepos.Where(r =>
-                r.FullName.Contains(q, StringComparison.OrdinalIgnoreCase)
-                || (r.Description?.Contains(q, StringComparison.OrdinalIgnoreCase) ?? false)
-            ).ToList();
-        }
-    }
 
     protected override async Task OnParametersSetAsync()
     {
@@ -349,212 +146,588 @@ else
         try
         {
             var connection = await JiraProvider.GetAsync();
-            if (connection is null) { _state = LoadState.NotConfigured; return; }
+            if (connection is null) { _loadState = LoadState.NotConfigured; return; }
 
-            var ticketTask = Jira.GetIssueAsync(TicketKey);
-            var existingTask = Workspaces.GetAsync(TicketKey);
-            var dockerTask = Docker.IsDockerAvailableAsync();
+            _ticket = await Jira.GetIssueAsync(TicketKey);
+            _workspace = await Workspaces.GetAsync(TicketKey);
+            _dockerAvailable = await Docker.IsDockerAvailableAsync();
 
-            await Task.WhenAll(ticketTask, existingTask, dockerTask);
-
-            _ticket = await ticketTask;
-            _existingWorkspace = await existingTask;
-            _dockerAvailable = await dockerTask;
-
-            if (_ticket is null)
-            {
-                _state = LoadState.NotFound;
-                return;
-            }
+            if (_ticket is null) { _loadState = LoadState.NotFound; return; }
 
             _branchName = TextSlug.BuildBranchName(_options.BranchNameTemplate, _ticket.Key, _ticket.Summary);
-            _state = LoadState.Loaded;
+            _loadState = LoadState.Loaded;
 
-            if (_existingWorkspace is null)
+            if (_workspace is not null)
+            {
+                await RunAnalysisAsync();
+            }
+            else
             {
                 _ = LoadGitHubReposAsync();
             }
         }
+        catch (Exception ex) { _loadState = LoadState.Error; _loadError = ex.Message; }
+    }
+
+    private void SetActiveStep(PipelineStep step)
+    {
+        if (_workflow.IsStepUnlocked(step))
+            _activeStep = step;
+    }
+
+    // ── Analyze Step ────────────────────────────────────────────────────
+
+    private async Task RunAnalysisAsync()
+    {
+        _analyzing = true;
+        try
+        {
+            var agent = AgentProvider.GetDefaultAgent();
+            var contexts = new List<RepoContext>();
+            if (_workspace?.Links is not null)
+            {
+                foreach (var link in _workspace.Links)
+                {
+                    var repoPath = Path.Combine(_options.ReposRoot, link.RepositoryName);
+                    if (Directory.Exists(repoPath))
+                    {
+                        try { contexts.Add(await agent.AnalyzeRepositoryAsync(repoPath, ct: default)); }
+                        catch { }
+                    }
+                }
+            }
+            _analysis = await agent.AnalyzeTicketAsync(_ticket!, contexts);
+            _workflow.Analysis = _analysis;
+            _workflow.Steps[PipelineStep.Analyze] = _analysis.HasErrors ? StepStatus.Warning : StepStatus.Passed;
+
+            // Auto-generate plan draft
+            _plan = await agent.GeneratePlanAsync(_ticket!, _analysis, contexts);
+            _workflow.Plan = _plan;
+            _workflow.Steps[PipelineStep.Plan] = StepStatus.AwaitingApproval;
+        }
         catch (Exception ex)
         {
-            _state = LoadState.Error;
-            _error = ex.Message;
+            _workflow.Steps[PipelineStep.Analyze] = StepStatus.Failed;
+            Toasts.Error($"Analysis failed: {ex.Message}");
         }
+        finally { _analyzing = false; }
     }
+
+    private RenderFragment RenderAnalyzeStep() => __builder =>
+    {
+        <h3 class="text-sm font-semibold mb-4">Analysis</h3>
+        @if (_analyzing)
+        {
+            <div class="flex items-center gap-3 text-sm text-zinc-500 py-6"><Spinner /> Analyzing ticket + repos…</div>
+        }
+        else if (_analysis is not null)
+        {
+            @if (_analysis.Gaps.Count > 0)
+            {
+                <div class="mb-4 space-y-1.5">
+                    @foreach (var gap in _analysis.Gaps)
+                    {
+                        var (icon, color) = gap.Severity switch
+                        {
+                            GapSeverity.Error => ("alert", "text-red-400"),
+                            GapSeverity.Warning => ("alert", "text-amber-400"),
+                            _ => ("info", "text-sky-400")
+                        };
+                        <div class="flex items-start gap-2 text-sm">
+                            <Icon Name="@icon" Class="@($"w-4 h-4 {color} mt-0.5 flex-shrink-0")" />
+                            <div>
+                                <span class="text-xs uppercase tracking-wider @color font-semibold">@gap.Severity</span>
+                                <span class="text-zinc-300 ml-2">@gap.Detail</span>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+            else
+            {
+                <div class="text-sm text-emerald-300 mb-4 flex items-center gap-2">
+                    <Icon Name="check" Class="w-4 h-4" /> No issues found.
+                </div>
+            }
+
+            @if (_analysis.Tasks.Count > 0)
+            {
+                <h4 class="text-xs uppercase tracking-wider text-zinc-500 mb-2">Tasks identified</h4>
+                <ol class="space-y-1 mb-4">
+                    @foreach (var task in _analysis.Tasks)
+                    {
+                        <li class="flex items-start gap-2 text-sm">
+                            <span class="text-zinc-600 font-mono text-xs mt-0.5">@task.Order.</span>
+                            <span class="text-zinc-200">@task.Description</span>
+                            @if (task.FromTicket) { <span class="text-[10px] text-zinc-500 border border-zinc-700 rounded px-1">from ticket</span> }
+                        </li>
+                    }
+                </ol>
+            }
+
+            <button type="button" @onclick="RunAnalysisAsync" class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1">
+                <Icon Name="refresh" Class="w-3 h-3" /> Re-analyze
+            </button>
+        }
+    };
+
+    // ── Plan Step ───────────────────────────────────────────────────────
+
+    private RenderFragment RenderPlanStep() => __builder =>
+    {
+        <h3 class="text-sm font-semibold mb-4">Implementation Plan</h3>
+        @if (_plan is null)
+        {
+            <div class="text-sm text-zinc-500">Run Analysis first to generate a plan.</div>
+        }
+        else
+        {
+            <div class="flex items-center gap-2 mb-4">
+                <span class="@PlanStatusBadge(_plan.Status)">@_plan.Status</span>
+                <span class="text-xs text-zinc-500">by @_plan.AgentUsed agent</span>
+            </div>
+
+            <div class="text-sm text-zinc-200 mb-4 whitespace-pre-wrap border-l-2 border-zinc-700 pl-3">@_plan.Approach</div>
+
+            @if (_plan.Tasks.Count > 0)
+            {
+                <h4 class="text-xs uppercase tracking-wider text-zinc-500 mb-2">Planned tasks</h4>
+                <ol class="space-y-1 mb-4">
+                    @foreach (var t in _plan.Tasks)
+                    {
+                        <li class="flex items-start gap-2 text-sm">
+                            <span class="text-zinc-600 font-mono text-xs mt-0.5">@t.Order.</span>
+                            <span class="text-zinc-200">@t.Description</span>
+                            @if (t.TargetFile is not null) { <code class="text-[10px] text-zinc-500">@t.TargetFile</code> }
+                        </li>
+                    }
+                </ol>
+            }
+
+            @if (_plan.OpenQuestions.Count > 0)
+            {
+                <h4 class="text-xs uppercase tracking-wider text-red-400 mb-2">Open questions</h4>
+                <ul class="space-y-1 mb-4">
+                    @foreach (var q in _plan.OpenQuestions)
+                    {
+                        <li class="text-sm text-red-300 flex items-start gap-2"><Icon Name="alert" Class="w-4 h-4 mt-0.5 flex-shrink-0" /> @q</li>
+                    }
+                </ul>
+            }
+
+            @if (_plan.Comments.Count > 0)
+            {
+                <h4 class="text-xs uppercase tracking-wider text-zinc-500 mb-2 mt-4">Discussion</h4>
+                <div class="space-y-2 mb-4 max-h-48 overflow-y-auto">
+                    @foreach (var c in _plan.Comments)
+                    {
+                        <div class="text-xs border-l-2 @CommentBorderColor(c.Type) pl-3">
+                            <span class="font-semibold text-zinc-300">@c.Author</span>
+                            <span class="text-zinc-600 ml-2">@c.At.ToLocalTime().ToString("g")</span>
+                            <div class="text-zinc-400 mt-0.5">@c.Content</div>
+                        </div>
+                    }
+                </div>
+            }
+
+            @if (_plan.NeedsAction)
+            {
+                <div class="flex flex-col gap-3 pt-4 border-t border-zinc-800/80">
+                    <div class="flex gap-2">
+                        <input @bind="_planComment" @bind:event="oninput" placeholder="Comment or feedback…"
+                               class="flex-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
+                    </div>
+                    <div class="flex gap-2">
+                        <button type="button" @onclick="ApprovePlan"
+                                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors">
+                            <Icon Name="check" Class="w-4 h-4" /> Approve
+                        </button>
+                        <button type="button" @onclick="RequestPlanChanges"
+                                class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-amber-900/70 hover:bg-amber-950/40 text-amber-300 text-sm font-medium transition-colors">
+                            Request changes
+                        </button>
+                        <button type="button" @onclick="RejectPlan"
+                                class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-red-900/70 hover:bg-red-950/40 text-red-300 text-sm font-medium transition-colors">
+                            Reject
+                        </button>
+                    </div>
+                </div>
+            }
+        }
+    };
+
+    private void ApprovePlan()
+    {
+        if (_plan is null) return;
+        _plan.Status = PlanStatus.Approved;
+        _plan.Comments.Add(new PlanComment(DateTimeOffset.UtcNow, "You", PlanCommentType.Approval, string.IsNullOrWhiteSpace(_planComment) ? "Approved." : _planComment));
+        _workflow.Steps[PipelineStep.Plan] = StepStatus.Passed;
+        _workflow.Steps[PipelineStep.Implement] = StepStatus.Running;
+        _planComment = string.Empty;
+        _activeStep = PipelineStep.Implement;
+        Toasts.Success("Plan approved. Implement step unlocked.");
+    }
+
+    private void RequestPlanChanges()
+    {
+        if (_plan is null || string.IsNullOrWhiteSpace(_planComment)) { Toasts.Warning("Add your feedback first."); return; }
+        _plan.Status = PlanStatus.ChangesRequested;
+        _plan.Comments.Add(new PlanComment(DateTimeOffset.UtcNow, "You", PlanCommentType.ChangeRequest, _planComment));
+        _workflow.Steps[PipelineStep.Plan] = StepStatus.Warning;
+        _planComment = string.Empty;
+    }
+
+    private void RejectPlan()
+    {
+        if (_plan is null) return;
+        _plan.Status = PlanStatus.Rejected;
+        _plan.Comments.Add(new PlanComment(DateTimeOffset.UtcNow, "You", PlanCommentType.Rejection, string.IsNullOrWhiteSpace(_planComment) ? "Rejected." : _planComment));
+        _workflow.Steps[PipelineStep.Plan] = StepStatus.Failed;
+        _planComment = string.Empty;
+    }
+
+    // ── Implement Step ──────────────────────────────────────────────────
+
+    private RenderFragment RenderImplementStep() => __builder =>
+    {
+        <h3 class="text-sm font-semibold mb-4">Implement</h3>
+        <div class="text-sm text-zinc-400 mb-4">Code your changes inside the container. When done, move to Validate.</div>
+
+        @if (_workspace?.ContainerName is not null)
+        {
+            <div class="flex items-center gap-2 mb-4">
+                <code class="flex-1 text-xs font-mono text-emerald-300 bg-zinc-950 border border-zinc-800 rounded px-2.5 py-1.5 truncate">
+                    docker exec -it @_workspace.ContainerName bash
+                </code>
+                <button type="button" @onclick="CopyAttachAsync" class="p-1.5 rounded-md text-zinc-500 hover:text-zinc-100 hover:bg-zinc-800 transition-colors" title="Copy">
+                    <Icon Name="copy" Class="w-4 h-4" />
+                </button>
+            </div>
+        }
+
+        <button type="button" @onclick="@(() => { _workflow.Steps[PipelineStep.Implement] = StepStatus.Passed; _activeStep = PipelineStep.Validate; })"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors">
+            <Icon Name="check" Class="w-4 h-4" /> Mark as done
+        </button>
+    };
+
+    // ── Validate Step ───────────────────────────────────────────────────
+
+    private RenderFragment RenderValidateStep() => __builder =>
+    {
+        <h3 class="text-sm font-semibold mb-4">Validate (Tests)</h3>
+        <button type="button" @onclick="RunTestsAsync" disabled="@_runningTests"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 mb-4">
+            @if (_runningTests) { <Spinner /> <span>Running tests…</span> }
+            else { <Icon Name="play" Class="w-4 h-4" /> <span>Run tests</span> }
+        </button>
+
+        @if (_testResult is not null)
+        {
+            <div class="@(_testResult.Passed ? "text-emerald-300" : "text-red-300") text-sm font-medium mb-2">
+                @(_testResult.Passed ? "Tests passed" : "Tests failed") (exit code @_testResult.ExitCode)
+                @if (_testResult.CoveragePercent is not null) { <span class="text-zinc-400 ml-2">Coverage: @_testResult.CoveragePercent.Value.ToString("F1")%</span> }
+            </div>
+            <pre class="text-xs text-zinc-400 bg-zinc-950 border border-zinc-800 rounded-lg p-3 max-h-64 overflow-y-auto whitespace-pre-wrap">@_testResult.Output</pre>
+        }
+    };
+
+    private async Task RunTestsAsync()
+    {
+        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return; }
+        _runningTests = true;
+        _workflow.Steps[PipelineStep.Validate] = StepStatus.Running;
+        try
+        {
+            // Detect test command from .lightsoff.yaml or tech stack
+            var testCmd = "npm test"; // fallback; ideally from RepoConfig/TechStack
+            var firstRepo = _workspace.Links.FirstOrDefault();
+            if (firstRepo is not null)
+            {
+                var configPath = Path.Combine(_options.ReposRoot, firstRepo.RepositoryName);
+                var stack = LightsOff.Infrastructure.Agents.TechStackDetector.Detect(configPath);
+                testCmd = stack.TestCommand ?? "npm test";
+            }
+
+            var exitCode = await Docker.ExecAsync(_workspace.ContainerId,
+                new[] { "sh", "-c", testCmd }, default);
+            _testResult = new TestResult(DateTimeOffset.UtcNow, exitCode, exitCode == 0,
+                exitCode == 0 ? "Tests passed." : $"Tests failed with exit code {exitCode}.", null);
+            _workflow.TestResult = _testResult;
+            _workflow.Steps[PipelineStep.Validate] = _testResult.Passed ? StepStatus.Passed : StepStatus.Failed;
+        }
+        catch (Exception ex)
+        {
+            _testResult = new TestResult(DateTimeOffset.UtcNow, -1, false, ex.Message, null);
+            _workflow.Steps[PipelineStep.Validate] = StepStatus.Failed;
+        }
+        finally { _runningTests = false; }
+    }
+
+    // ── Review Step ─────────────────────────────────────────────────────
+
+    private RenderFragment RenderReviewStep() => __builder =>
+    {
+        <h3 class="text-sm font-semibold mb-4">Review (Security + Quality)</h3>
+        <button type="button" @onclick="RunReviewAsync" disabled="@_reviewing"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 mb-4">
+            @if (_reviewing) { <Spinner /> <span>Reviewing…</span> }
+            else { <Icon Name="search" Class="w-4 h-4" /> <span>Run review</span> }
+        </button>
+
+        @if (_review is not null)
+        {
+            <div class="text-sm mb-2">
+                <span class="@(_review.HasCritical ? "text-red-300" : "text-emerald-300") font-medium">
+                    @_review.SecurityFindings.Count security · @_review.QualityFindings.Count quality findings
+                </span>
+            </div>
+
+            @if (_review.SecurityFindings.Count > 0)
+            {
+                <h4 class="text-xs uppercase tracking-wider text-red-400 mb-2">Security</h4>
+                <div class="space-y-1 mb-4">
+                    @foreach (var f in _review.SecurityFindings)
+                    {
+                        <div class="text-xs flex items-start gap-2">
+                            <span class="uppercase font-bold @(f.Severity == "high" ? "text-red-400" : "text-amber-400")">@f.Severity</span>
+                            <span class="text-zinc-300">@f.Detail</span>
+                            <code class="text-zinc-500">@f.File:@f.Line</code>
+                        </div>
+                    }
+                </div>
+            }
+
+            @if (_review.QualityFindings.Count > 0)
+            {
+                <h4 class="text-xs uppercase tracking-wider text-amber-400 mb-2">Quality</h4>
+                <div class="space-y-1 mb-4">
+                    @foreach (var f in _review.QualityFindings)
+                    {
+                        <div class="text-xs flex items-start gap-2">
+                            <span class="uppercase font-bold text-zinc-500">@f.Category</span>
+                            <span class="text-zinc-300">@f.Detail</span>
+                            <code class="text-zinc-500">@f.File</code>
+                        </div>
+                    }
+                </div>
+            }
+
+            @if (_review.TotalFindings == 0)
+            {
+                <div class="text-sm text-emerald-300 flex items-center gap-2"><Icon Name="check" Class="w-4 h-4" /> Clean — no findings.</div>
+            }
+        }
+    };
+
+    private async Task RunReviewAsync()
+    {
+        _reviewing = true;
+        _workflow.Steps[PipelineStep.Review] = StepStatus.Running;
+        try
+        {
+            var agent = AgentProvider.GetDefaultAgent();
+            var firstLink = _workspace!.Links.First();
+            var repoPath = Path.Combine(_options.ReposRoot, firstLink.RepositoryName);
+            var repo = await Registry.GetAsync(firstLink.RepositoryName);
+            var diff = await Git.GetDiffAsync(repoPath, repo?.DefaultBranch ?? "main", firstLink.BranchName);
+
+            var ctx = await agent.AnalyzeRepositoryAsync(repoPath);
+            _review = await agent.ReviewChangesAsync(diff, ctx);
+            _workflow.ReviewResult = _review;
+            _workflow.Steps[PipelineStep.Review] = _review.HasCritical ? StepStatus.Warning : StepStatus.Passed;
+        }
+        catch (Exception ex)
+        {
+            _workflow.Steps[PipelineStep.Review] = StepStatus.Failed;
+            Toasts.Error($"Review failed: {ex.Message}");
+        }
+        finally { _reviewing = false; }
+    }
+
+    // ── Submit Step ─────────────────────────────────────────────────────
+
+    private RenderFragment RenderSubmitStep() => __builder =>
+    {
+        <h3 class="text-sm font-semibold mb-4">Submit (Push + PRs)</h3>
+        <button type="button" @onclick="SubmitAsync" disabled="@_submitting"
+                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 mb-4">
+            @if (_submitting) { <Spinner /> <span>Pushing + opening PRs…</span> }
+            else { <Icon Name="external" Class="w-4 h-4" /> <span>Submit PRs</span> }
+        </button>
+
+        @if (_submitResults is not null)
+        {
+            <div class="rounded-lg border border-zinc-800 bg-zinc-950/40 divide-y divide-zinc-800/60 overflow-hidden">
+                @foreach (var r in _submitResults)
+                {
+                    <div class="px-4 py-2.5 flex items-center gap-3 text-sm">
+                        @if (r.Url is not null)
+                        {
+                            <Icon Name="check" Class="w-4 h-4 text-emerald-400" />
+                            <span class="font-medium">@r.RepositoryName</span>
+                            <a href="@r.Url" target="_blank" class="text-emerald-400 hover:text-emerald-300 truncate">@r.Url <Icon Name="external" Class="w-3.5 h-3.5 inline" /></a>
+                        }
+                        else
+                        {
+                            <Icon Name="alert" Class="w-4 h-4 text-red-400" />
+                            <span class="font-medium">@r.RepositoryName</span>
+                            <span class="text-red-300 text-xs truncate">@r.Error</span>
+                        }
+                    </div>
+                }
+            </div>
+        }
+    };
+
+    private async Task SubmitAsync()
+    {
+        _submitting = true;
+        _workflow.Steps[PipelineStep.Submit] = StepStatus.Running;
+        try
+        {
+            _submitResults = await Workspaces.SubmitAsync(TicketKey);
+            _workflow.SubmitResults = _submitResults;
+            _workflow.Steps[PipelineStep.Submit] = _submitResults.All(r => r.Url is not null) ? StepStatus.Passed : StepStatus.Warning;
+            Toasts.Success($"Opened {_submitResults.Count(r => r.Url is not null)} PR(s).");
+        }
+        catch (Exception ex)
+        {
+            _workflow.Steps[PipelineStep.Submit] = StepStatus.Failed;
+            Toasts.Error(ex.Message);
+        }
+        finally { _submitting = false; }
+    }
+
+    // ── Workspace Creation (when no workspace exists) ───────────────────
+
+    private RenderFragment RenderWorkspaceCreation() => __builder =>
+    {
+        <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-6">
+            <div class="flex items-center justify-between mb-5">
+                <div>
+                    <h2 class="text-sm font-semibold">Create workspace</h2>
+                    <p class="text-xs text-zinc-500 mt-0.5">Pick repos, then clone + branch + container.</p>
+                </div>
+            </div>
+
+            <div class="mb-4 relative">
+                <div class="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600"><Icon Name="search" Class="w-4 h-4" /></div>
+                <input @bind="_query" @bind:event="oninput" placeholder="Filter repos…"
+                       class="w-full bg-zinc-950 border border-zinc-800 rounded-md pl-9 pr-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
+            </div>
+
+            @if (_loadingRepos)
+            {
+                <div class="flex items-center gap-3 text-sm text-zinc-500 py-6 justify-center border border-zinc-800 rounded-md bg-zinc-950/60"><Spinner /> Fetching…</div>
+            }
+            else if (_githubRepos is { Count: > 0 })
+            {
+                <div class="rounded-md border border-zinc-800 bg-zinc-950/60 divide-y divide-zinc-800/80 max-h-64 overflow-y-auto mb-4">
+                    @foreach (var repo in FilteredRepos)
+                    {
+                        var sel = _selectedRepos.Contains(repo.FullName);
+                        <label class="flex items-start gap-3 px-3 py-2.5 cursor-pointer hover:bg-zinc-900/60 transition-colors">
+                            <input type="checkbox" checked="@sel" @onchange="@(e => { if ((bool)e.Value!) _selectedRepos.Add(repo.FullName); else _selectedRepos.Remove(repo.FullName); })"
+                                   class="mt-1 w-4 h-4 rounded border-zinc-700 bg-zinc-950 text-emerald-500 focus:ring-2 focus:ring-emerald-500/40 focus:ring-offset-0" />
+                            <div class="flex-1 min-w-0">
+                                <span class="text-sm font-medium text-zinc-100"><span class="text-zinc-500">@repo.OwnerLogin/</span>@repo.Name</span>
+                                <code class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800/60 text-zinc-400 border border-zinc-700 ml-2">@repo.DefaultBranch</code>
+                            </div>
+                        </label>
+                    }
+                </div>
+            }
+
+            <div class="mt-4">
+                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Branch name</label>
+                <input @bind="_branchName" class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors font-mono text-xs" />
+            </div>
+
+            @if (!string.IsNullOrEmpty(_createError))
+            {
+                <div class="mt-4"><Alert Kind="Alert.AlertKind.Error">@_createError</Alert></div>
+            }
+
+            <div class="flex gap-2 pt-5 mt-5 border-t border-zinc-800/80">
+                <button type="button" @onclick="CreateWorkspaceAsync"
+                        disabled="@(_creating || _selectedRepos.Count == 0)"
+                        class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+                    @if (_creating) { <Spinner /> <span>Creating…</span> }
+                    else { <Icon Name="play" Class="w-4 h-4" /> <span>Create workspace · @_selectedRepos.Count repo(s)</span> }
+                </button>
+            </div>
+        </div>
+    };
+
+    private IReadOnlyList<GitHubRepo> FilteredRepos =>
+        _githubRepos is null ? Array.Empty<GitHubRepo>() :
+        string.IsNullOrWhiteSpace(_query) ? _githubRepos :
+        _githubRepos.Where(r => r.FullName.Contains(_query, StringComparison.OrdinalIgnoreCase)).ToList();
 
     private async Task LoadGitHubReposAsync()
     {
-        _loadingRepos = true;
-        _reposError = null;
-        _githubRepos = null;
-        await InvokeAsync(StateHasChanged);
-        try
-        {
-            _githubRepos = await GitHub.ListAccessibleReposAsync();
-        }
-        catch (Exception ex)
-        {
-            _reposError = ex.Message;
-        }
-        finally
-        {
-            _loadingRepos = false;
-            await InvokeAsync(StateHasChanged);
-        }
-    }
-
-    private void ToggleRepo(GitHubRepo repo, bool selected)
-    {
-        if (selected) _selectedRepoFullNames.Add(repo.FullName);
-        else _selectedRepoFullNames.Remove(repo.FullName);
+        _loadingRepos = true; await InvokeAsync(StateHasChanged);
+        try { _githubRepos = await GitHub.ListAccessibleReposAsync(); }
+        catch (Exception ex) { _reposError = ex.Message; }
+        finally { _loadingRepos = false; await InvokeAsync(StateHasChanged); }
     }
 
     private async Task CreateWorkspaceAsync()
     {
-        if (_ticket is null || _selectedRepoFullNames.Count == 0 || _githubRepos is null) return;
-
-        _creating = true;
-        _createError = null;
+        if (_ticket is null || _selectedRepos.Count == 0) return;
+        _creating = true; _createError = null;
         try
         {
-            // Auto-register any selected repos that aren't yet in the registry (keeps CLI + reuse working),
-            // then create the workspace referencing them by name.
-            var existingNames = (await Registry.ListAsync())
-                .Select(r => r.Name)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-            var selectedRepos = _githubRepos
-                .Where(r => _selectedRepoFullNames.Contains(r.FullName))
-                .ToList();
-
-            foreach (var gh in selectedRepos)
+            var existing = (await Registry.ListAsync()).Select(r => r.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var selected = _githubRepos!.Where(r => _selectedRepos.Contains(r.FullName)).ToList();
+            foreach (var gh in selected)
             {
-                if (!existingNames.Contains(gh.Name))
-                {
-                    await Registry.AddAsync(new Repository
-                    {
-                        Name = gh.Name,
-                        CloneUrl = gh.CloneUrl,
-                        DefaultBranch = gh.DefaultBranch
-                    });
-                }
+                if (!existing.Contains(gh.Name))
+                    await Registry.AddAsync(new Repository { Name = gh.Name, CloneUrl = gh.CloneUrl, DefaultBranch = gh.DefaultBranch });
             }
-
-            var request = new CreateWorkspaceRequest(
-                _ticket.Key,
-                _ticket.Summary,
-                selectedRepos.Select(r => r.Name).ToList(),
-                BranchNameOverride: _branchName.Trim(),
-                StartContainer: _dockerAvailable == true);
-
-            _existingWorkspace = await Workspaces.CreateAsync(request);
+            var request = new CreateWorkspaceRequest(_ticket.Key, _ticket.Summary, selected.Select(r => r.Name).ToList(), _branchName.Trim(), _dockerAvailable == true);
+            _workspace = await Workspaces.CreateAsync(request);
             Toasts.Success($"Workspace created for {_ticket.Key}.");
+            await RunAnalysisAsync();
         }
-        catch (Exception ex)
-        {
-            _createError = ex.InnerException?.Message ?? ex.Message;
-        }
-        finally
-        {
-            _creating = false;
-        }
+        catch (Exception ex) { _createError = ex.InnerException?.Message ?? ex.Message; }
+        finally { _creating = false; }
     }
 
-    private async Task SubmitWorkspaceAsync()
+    private async Task CopyAttachAsync()
     {
-        if (_existingWorkspace is null) return;
-        _submitting = true;
-        try
-        {
-            var results = await Workspaces.SubmitAsync(_existingWorkspace.TicketKey);
-            _submitResults = results;
-            var opened = results.Count(r => r.Url is not null);
-            var failed = results.Count(r => r.Url is null);
-            if (failed == 0)
-            {
-                Toasts.Success($"Opened {opened} pull request{(opened == 1 ? "" : "s")}.");
-            }
-            else if (opened == 0)
-            {
-                Toasts.Error($"All {failed} submit(s) failed.");
-            }
-            else
-            {
-                Toasts.Warning($"Opened {opened}, {failed} failed.");
-            }
-        }
-        catch (Exception ex)
-        {
-            Toasts.Error(ex.Message);
-        }
-        finally
-        {
-            _submitting = false;
-        }
+        if (_workspace?.ContainerName is null) return;
+        try { await JS.InvokeVoidAsync("navigator.clipboard.writeText", $"docker exec -it {_workspace.ContainerName} bash"); Toasts.Success("Copied."); }
+        catch { Toasts.Info($"docker exec -it {_workspace.ContainerName} bash"); }
     }
 
-    private async Task DestroyWorkspaceAsync()
-    {
-        if (_existingWorkspace is null) return;
-        _destroying = true;
-        try
-        {
-            await Workspaces.DestroyAsync(_existingWorkspace.TicketKey);
-            Toasts.Info($"Workspace {_existingWorkspace.TicketKey} destroyed.");
-            _existingWorkspace = null;
-            _selectedRepoFullNames.Clear();
-            _ = LoadGitHubReposAsync();
-        }
-        catch (Exception ex)
-        {
-            Toasts.Error(ex.Message);
-        }
-        finally
-        {
-            _destroying = false;
-        }
-    }
+    // ── Style helpers ───────────────────────────────────────────────────
 
-    private async Task CopyAttachCommandAsync()
-    {
-        if (_existingWorkspace?.ContainerName is null) return;
-        var cmd = $"docker exec -it {_existingWorkspace.ContainerName} bash";
-        try
+    private static string StatusBadge(string status) =>
+        "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border " +
+        status.ToLowerInvariant() switch
         {
-            await JS.InvokeVoidAsync("navigator.clipboard.writeText", cmd);
-            Toasts.Success("Copied to clipboard.");
-        }
-        catch
-        {
-            Toasts.Info(cmd);
-        }
-    }
-
-    private static string StatusBadgeClasses(string status)
-    {
-        var baseClasses = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ";
-        var lower = status.ToLowerInvariant();
-        return baseClasses + lower switch
-        {
-            var s when s.Contains("done") || s.Contains("closed") || s.Contains("resolved")
-                => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-            var s when s.Contains("progress") || s.Contains("review")
-                => "bg-sky-500/10 text-sky-300 border-sky-500/30",
-            var s when s.Contains("block")
-                => "bg-red-500/10 text-red-300 border-red-500/30",
+            var s when s.Contains("done") || s.Contains("closed") => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+            var s when s.Contains("progress") || s.Contains("review") => "bg-sky-500/10 text-sky-300 border-sky-500/30",
             _ => "bg-zinc-800/70 text-zinc-300 border-zinc-700"
         };
-    }
 
-    private static string WorkspaceStatusBadge(WorkspaceStatus status)
-    {
-        var baseClasses = "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ";
-        return baseClasses + status switch
+    private static string PlanStatusBadge(PlanStatus status) =>
+        "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border " +
+        status switch
         {
-            WorkspaceStatus.Running => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
-            WorkspaceStatus.Stopped => "bg-zinc-800/70 text-zinc-400 border-zinc-700",
-            WorkspaceStatus.Destroyed => "bg-red-500/10 text-red-400 border-red-500/30",
-            _ => "bg-sky-500/10 text-sky-300 border-sky-500/30"
+            PlanStatus.Approved => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+            PlanStatus.Rejected => "bg-red-500/10 text-red-300 border-red-500/30",
+            PlanStatus.ChangesRequested => "bg-amber-500/10 text-amber-300 border-amber-500/30",
+            _ => "bg-zinc-800/70 text-zinc-300 border-zinc-700"
         };
-    }
+
+    private static string CommentBorderColor(PlanCommentType type) => type switch
+    {
+        PlanCommentType.Approval => "border-emerald-500",
+        PlanCommentType.Rejection => "border-red-500",
+        PlanCommentType.ChangeRequest => "border-amber-500",
+        _ => "border-zinc-700"
+    };
 }

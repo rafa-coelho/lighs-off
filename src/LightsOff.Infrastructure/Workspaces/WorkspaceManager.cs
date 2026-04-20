@@ -17,6 +17,7 @@ public class WorkspaceManager : IWorkspaceManager
     private readonly IGitHubClient _github;
     private readonly IDockerService _docker;
     private readonly IJiraConnectionProvider _jiraConn;
+    private readonly ICodeAgentProvider _agentProvider;
     private readonly RepoConfigLoader _configLoader;
     private readonly LightsOffOptions _options;
     private readonly ILogger<WorkspaceManager> _logger;
@@ -28,6 +29,7 @@ public class WorkspaceManager : IWorkspaceManager
         IGitHubClient github,
         IDockerService docker,
         IJiraConnectionProvider jiraConn,
+        ICodeAgentProvider agentProvider,
         RepoConfigLoader configLoader,
         IOptions<LightsOffOptions> options,
         ILogger<WorkspaceManager> logger)
@@ -38,6 +40,7 @@ public class WorkspaceManager : IWorkspaceManager
         _github = github;
         _docker = docker;
         _jiraConn = jiraConn;
+        _agentProvider = agentProvider;
         _configLoader = configLoader;
         _options = options.Value;
         _logger = logger;
@@ -92,6 +95,17 @@ public class WorkspaceManager : IWorkspaceManager
 
             // Optional per-repo config — affects image choice, ports, env, post-create steps.
             repoConfigs.Add((repo.Name, _configLoader.TryLoad(repoDestination)));
+
+            // Analyze the repo and produce context.md for LLM/agent consumption.
+            try
+            {
+                var agent = _agentProvider.GetDefaultAgent();
+                await agent.AnalyzeRepositoryAsync(repoDestination, ct: ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Repo analysis failed for {Repo}; continuing without context", repo.Name);
+            }
 
             links.Add(new TicketRepositoryLink
             {

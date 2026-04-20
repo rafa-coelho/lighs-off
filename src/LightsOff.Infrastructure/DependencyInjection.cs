@@ -43,7 +43,9 @@ public static class DependencyInjection
         services.AddSingleton<IDockerService, DockerService>();
         services.AddScoped<IRepositoryRegistry, RepositoryRegistry>();
         services.AddSingleton<Workspaces.RepoConfigLoader>();
-        services.AddSingleton<ICodeAgent, LocalCodeAgent>();
+        services.AddSingleton<LocalCodeAgent>();
+        services.AddSingleton<ICodeAgent>(sp => sp.GetRequiredService<LocalCodeAgent>());
+        services.AddSingleton<ICodeAgent, ClaudeCodeAgent>();
         services.AddSingleton<ICodeAgentProvider, CodeAgentProvider>();
         services.AddScoped<IWorkspaceManager, WorkspaceManager>();
 

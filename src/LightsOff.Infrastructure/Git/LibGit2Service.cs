@@ -93,6 +93,39 @@ public class LibGit2Service : IGitService
         }, ct);
     }
 
+    public Task<string> GetDiffAsync(string repoPath, string baseBranch, string headBranch, CancellationToken ct = default)
+    {
+        return Task.Run(() =>
+        {
+            using var git = new GitRepo(repoPath);
+            var baseCommit = git.Branches[baseBranch]?.Tip
+                          ?? git.Branches[$"origin/{baseBranch}"]?.Tip;
+            var headCommit = git.Branches[headBranch]?.Tip ?? git.Head.Tip;
+            if (baseCommit is null) return string.Empty;
+            var diff = git.Diff.Compare<LibGit2Sharp.Patch>(baseCommit.Tree, headCommit.Tree);
+            return diff.Content;
+        }, ct);
+    }
+
+    public Task<int> CountNewUpstreamCommitsAsync(string repoPath, string defaultBranch, string excludeAuthor, CancellationToken ct = default)
+    {
+        return Task.Run(() =>
+        {
+            using var git = new GitRepo(repoPath);
+            var remote = git.Branches[$"origin/{defaultBranch}"];
+            var local = git.Branches[defaultBranch];
+            if (remote is null || local is null) return 0;
+
+            var filter = new LibGit2Sharp.CommitFilter
+            {
+                IncludeReachableFrom = remote,
+                ExcludeReachableFrom = local
+            };
+            return git.Commits.QueryBy(filter)
+                .Count(c => !c.Author.Name.Equals(excludeAuthor, StringComparison.OrdinalIgnoreCase));
+        }, ct);
+    }
+
     public async Task PushBranchAsync(string repoPath, string branchName, CancellationToken ct = default)
     {
         var credentials = await GetCredentialsAsync(ct).ConfigureAwait(false)

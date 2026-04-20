@@ -1,0 +1,61 @@
+@using LightsOff.Core.Domain
+
+<div class="flex items-center gap-1 mb-6">
+    @foreach (var step in _steps)
+    {
+        var status = State.Steps.GetValueOrDefault(step, StepStatus.Pending);
+        var unlocked = State.IsStepUnlocked(step);
+        var active = step == ActiveStep;
+
+        <button type="button"
+                disabled="@(!unlocked)"
+                @onclick="() => OnStepClick.InvokeAsync(step)"
+                class="@StepClass(status, active, unlocked)">
+            <span class="flex items-center justify-center w-6 h-6 rounded-full mr-2 text-xs font-bold @StepCircleClass(status)">
+                @StatusIcon(status)
+            </span>
+            <span class="text-xs font-medium">@step</span>
+        </button>
+
+        @if (step != PipelineStep.Submit)
+        {
+            <div class="w-6 h-px @(status is StepStatus.Passed or StepStatus.Warning ? "bg-emerald-500/50" : "bg-zinc-800")"></div>
+        }
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public WorkflowState State { get; set; } = new();
+    [Parameter] public PipelineStep ActiveStep { get; set; } = PipelineStep.Analyze;
+    [Parameter] public EventCallback<PipelineStep> OnStepClick { get; set; }
+
+    private static readonly PipelineStep[] _steps = Enum.GetValues<PipelineStep>();
+
+    private static string StepClass(StepStatus status, bool active, bool unlocked)
+    {
+        var baseClass = "inline-flex items-center px-3 py-2 rounded-lg text-sm transition-colors ";
+        if (!unlocked) return baseClass + "opacity-40 cursor-not-allowed bg-zinc-950";
+        if (active) return baseClass + "bg-zinc-800 border border-zinc-700 cursor-pointer";
+        return baseClass + "hover:bg-zinc-900/60 cursor-pointer";
+    }
+
+    private static string StepCircleClass(StepStatus status) => status switch
+    {
+        StepStatus.Passed => "bg-emerald-500/20 text-emerald-300",
+        StepStatus.Warning => "bg-amber-500/20 text-amber-300",
+        StepStatus.Failed => "bg-red-500/20 text-red-300",
+        StepStatus.Running => "bg-sky-500/20 text-sky-300",
+        StepStatus.AwaitingApproval => "bg-amber-500/20 text-amber-300",
+        _ => "bg-zinc-800 text-zinc-500"
+    };
+
+    private static string StatusIcon(StepStatus status) => status switch
+    {
+        StepStatus.Passed => "✓",
+        StepStatus.Warning => "!",
+        StepStatus.Failed => "✗",
+        StepStatus.Running => "…",
+        StepStatus.AwaitingApproval => "?",
+        _ => "·"
+    };
+}
