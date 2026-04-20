@@ -54,7 +54,7 @@ public class DockerService : IDockerService, IAsyncDisposable
         return response.ID;
     }
 
-    public async Task<int> ExecAsync(string containerId, IReadOnlyList<string> command, CancellationToken ct = default)
+    public async Task<(int ExitCode, string Output)> ExecAsync(string containerId, IReadOnlyList<string> command, CancellationToken ct = default)
     {
         var exec = await _client.Value.Exec.ExecCreateContainerAsync(containerId, new ContainerExecCreateParameters
         {
@@ -68,17 +68,12 @@ public class DockerService : IDockerService, IAsyncDisposable
         var (stdout, stderr) = await stream.ReadOutputToEndAsync(ct).ConfigureAwait(false);
 
         var inspect = await _client.Value.Exec.InspectContainerExecAsync(exec.ID, ct).ConfigureAwait(false);
+        var combined = string.IsNullOrWhiteSpace(stderr) ? stdout : $"{stdout}\n{stderr}";
         if (inspect.ExitCode != 0)
         {
-            _logger.LogWarning("Exec in {Id} exit={Exit} stderr={Stderr}", containerId, inspect.ExitCode,
-                stderr.Length > 500 ? stderr[..500] + "…" : stderr);
+            _logger.LogWarning("Exec in {Id} exit={Exit}", containerId, inspect.ExitCode);
         }
-        else if (!string.IsNullOrWhiteSpace(stdout))
-        {
-            _logger.LogDebug("Exec in {Id} stdout: {Stdout}", containerId,
-                stdout.Length > 500 ? stdout[..500] + "…" : stdout);
-        }
-        return (int)inspect.ExitCode;
+        return ((int)inspect.ExitCode, combined.Trim());
     }
 
     private static (Dictionary<string, EmptyStruct> Exposed, Dictionary<string, IList<PortBinding>> Bindings)

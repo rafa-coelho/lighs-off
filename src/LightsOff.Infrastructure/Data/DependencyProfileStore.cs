@@ -43,13 +43,15 @@ public class DependencyProfileStore
                 ("RepositoryName", "DetectedAt", "AgentUsed", "RuntimesJson", "PackageInstallCommandsJson", "CustomCommandsJson")
             VALUES ({0}, {1}, {2}, {3}, {4}, {5})
             """,
-            profile.RepositoryName,
-            profile.DetectedAt.ToString("O"),
-            profile.AgentUsed,
-            runtimesJson,
-            pkgJson,
-            customJson,
-            ct).ConfigureAwait(false);
+            new object[]
+            {
+                profile.RepositoryName,
+                profile.DetectedAt.ToString("O"),
+                profile.AgentUsed,
+                runtimesJson,
+                pkgJson,
+                customJson
+            }).ConfigureAwait(false);
     }
 
     // EF Core SqlQueryRaw needs a concrete type to map to

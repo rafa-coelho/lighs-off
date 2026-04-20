@@ -20,6 +20,6 @@ public interface IDockerService
     Task<string?> GetStatusAsync(string containerId, CancellationToken ct = default);
     Task<bool> IsDockerAvailableAsync(CancellationToken ct = default);
 
-    /// <summary>Run a shell command inside the container. Returns the exit code.</summary>
-    Task<int> ExecAsync(string containerId, IReadOnlyList<string> command, CancellationToken ct = default);
+    /// <summary>Run a shell command inside the container. Returns exit code + combined stdout/stderr output.</summary>
+    Task<(int ExitCode, string Output)> ExecAsync(string containerId, IReadOnlyList<string> command, CancellationToken ct = default);
 }

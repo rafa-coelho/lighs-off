@@ -17,12 +17,13 @@ public static class RuntimeInstaller
             echo "node $(node --version) installed"
             """,
         "dotnet" => $"""
-            echo '>>> Installing .NET SDK {req.Version}'
+            echo '>>> Installing .NET SDK {NormalizeDotnetChannel(req.Version)}'
             apt-get install -y wget
             wget -q https://dot.net/v1/dotnet-install.sh -O /tmp/dotnet-install.sh
             chmod +x /tmp/dotnet-install.sh
-            /tmp/dotnet-install.sh --channel {req.Version} --install-dir /usr/share/dotnet
+            /tmp/dotnet-install.sh --channel {NormalizeDotnetChannel(req.Version)} --install-dir /usr/share/dotnet
             ln -sf /usr/share/dotnet/dotnet /usr/bin/dotnet
+            export DOTNET_ROOT=/usr/share/dotnet
             echo "dotnet $(dotnet --version) installed"
             """,
         "python" => $"""
@@ -58,6 +59,13 @@ public static class RuntimeInstaller
             """,
         _ => $"echo 'Unknown runtime: {req.Runtime} — skipping'"
     };
+
+    private static string NormalizeDotnetChannel(string version)
+    {
+        var v = version.Trim();
+        if (!v.Contains('.')) v += ".0";
+        return v;
+    }
 
     public static string GenerateInstallScript(RepoDependencyProfile profile)
     {
