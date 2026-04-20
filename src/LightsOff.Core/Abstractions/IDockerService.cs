@@ -22,4 +22,7 @@ public interface IDockerService
 
     /// <summary>Run a shell command inside the container. Returns exit code + combined stdout/stderr output.</summary>
     Task<(int ExitCode, string Output)> ExecAsync(string containerId, IReadOnlyList<string> command, CancellationToken ct = default);
+
+    /// <summary>Run a command with streaming output. <paramref name="onChunk"/> is called with each output chunk as it arrives.</summary>
+    Task<int> ExecStreamAsync(string containerId, IReadOnlyList<string> command, Func<string, Task> onChunk, CancellationToken ct = default);
 }

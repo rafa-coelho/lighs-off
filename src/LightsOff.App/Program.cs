@@ -50,6 +50,7 @@ try
         .AddInteractiveServerComponents();
 
     builder.Services.AddScoped<ToastService>();
+    builder.Services.AddSingleton<TestRunnerService>();
     builder.Services.AddLightsOffInfrastructure(builder.Configuration);
 
     builder.Services.AddHostedService<WorkspaceHealthWorker>();

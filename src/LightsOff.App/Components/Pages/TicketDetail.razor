@@ -16,7 +16,9 @@
 @inject IOptions<LightsOffOptions> OptionsAccessor
 @inject ToastService Toasts
 @inject NavigationManager Nav
+@inject TestRunnerService TestRunner
 @inject IJSRuntime JS
+@implements IDisposable
 
 <PageTitle>@TicketKey</PageTitle>
 
@@ -178,6 +180,16 @@ else
                 LoadWorkflowState();
                 await LoadTestConfigsAsync();
                 await LoadDepProfilesAsync();
+
+                // Subscribe to test runner for live updates (survives F5)
+                TestRunner.RunUpdated -= OnTestRunUpdated; // prevent double-subscribe
+                TestRunner.RunUpdated += OnTestRunUpdated;
+                var activeRun = TestRunner.GetActiveRun(TicketKey);
+                if (activeRun is not null)
+                {
+                    _suiteResult = activeRun.Suite;
+                    _runningTests = activeRun.IsRunning;
+                }
                 // Only auto-analyze if no saved state exists (first time opening this ticket)
                 if (_workflow.Steps[PipelineStep.Analyze] == StepStatus.Pending)
                 {
@@ -836,6 +848,7 @@ else
                     _workflow.Analysis = _analysis;
                     _plan = loaded.Plan;
                     _workflow.Plan = _plan;
+                    _suiteResult = loaded.TestResults;
                     _activeStep = loaded.ActiveStep;
                 }
             }
@@ -853,6 +866,7 @@ else
                 Steps = _workflow.Steps,
                 Analysis = _analysis,
                 Plan = _plan,
+                TestResults = _suiteResult,
                 ActiveStep = _activeStep
             };
             var json = JsonSerializer.Serialize(persist, _jsonOpts);
@@ -870,6 +884,7 @@ else
         public Dictionary<PipelineStep, StepStatus>? Steps { get; set; }
         public TicketAnalysis? Analysis { get; set; }
         public ImplementationPlan? Plan { get; set; }
+        public TestSuiteResult? TestResults { get; set; }
         public PipelineStep ActiveStep { get; set; }
     }
 
@@ -941,73 +956,28 @@ else
         await InvokeAsync(StateHasChanged);
     }
 
-    private async Task RunSingleTestAsync(RepoTestConfig config)
+    private Task RunSingleTestAsync(RepoTestConfig config)
     {
-        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return; }
+        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return Task.CompletedTask; }
         var commands = GetCommands(config).Where(c => !string.IsNullOrWhiteSpace(c)).ToList();
-        if (commands.Count == 0) { Toasts.Warning("Add at least one command."); return; }
+        if (commands.Count == 0) { Toasts.Warning("Add at least one command."); return Task.CompletedTask; }
+
+        TestRunner.StartRun(_workspace.TicketKey, _workspace.ContainerId, new List<RepoTestConfig> { config }, _options.ReposRoot);
         _runningTests = true;
-
-        var run = new TestRunResult { ConfigName = config.Name, RepositoryName = config.RepositoryName };
-        _suiteResult ??= new TestSuiteResult();
-        _suiteResult.Results.RemoveAll(r => r.ConfigName == config.Name && r.RepositoryName == config.RepositoryName);
-        _suiteResult.Results.Add(run);
-
-        var workDir = string.IsNullOrWhiteSpace(config.WorkingDir)
-            ? $"/workspace/{config.RepositoryName}"
-            : $"/workspace/{config.RepositoryName}/{config.WorkingDir.Trim('/')}";
-
-        await InvokeAsync(StateHasChanged);
-
-        try
-        {
-            foreach (var cmd in commands)
-            {
-                var step = new CommandStep { Command = cmd, IsRunning = true };
-                run.Steps.Add(step);
-                await InvokeAsync(StateHasChanged);
-
-                var sw = System.Diagnostics.Stopwatch.StartNew();
-                var (exitCode, output) = await Docker.ExecAsync(_workspace.ContainerId,
-                    new[] { "sh", "-c", $"cd {workDir} && {cmd}" }, default);
-                sw.Stop();
-
-                step.IsRunning = false;
-                step.ExitCode = exitCode;
-                step.Passed = exitCode == 0;
-                step.Output = output;
-                step.Duration = sw.Elapsed;
-                await InvokeAsync(StateHasChanged);
-
-                if (exitCode != 0) break;
-            }
-        }
-        catch (Exception ex) { Toasts.Error(ex.Message); }
-        finally { _runningTests = false; await InvokeAsync(StateHasChanged); }
+        _workflow.Steps[PipelineStep.Validate] = StepStatus.Running;
+        return Task.CompletedTask;
     }
 
-    private async Task RunAllTestsAsync()
+    private Task RunAllTestsAsync()
     {
-        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return; }
+        if (_workspace?.ContainerId is null) { Toasts.Warning("No container running."); return Task.CompletedTask; }
+        if (_testConfigs.Count == 0) return Task.CompletedTask;
+
+        TestRunner.StartRun(_workspace.TicketKey, _workspace.ContainerId, _testConfigs, _options.ReposRoot);
         _runningTests = true;
-        _suiteResult = new TestSuiteResult();
+        _suiteResult = TestRunner.GetActiveRun(_workspace.TicketKey)?.Suite;
         _workflow.Steps[PipelineStep.Validate] = StepStatus.Running;
-        await InvokeAsync(StateHasChanged);
-        try
-        {
-            foreach (var config in _testConfigs)
-            {
-                await RunSingleTestAsync(config);
-            }
-            _workflow.Steps[PipelineStep.Validate] = _suiteResult.AllPassed ? StepStatus.Passed : StepStatus.Failed;
-            Toasts.Success($"Tests: {_suiteResult.PassedCount} passed, {_suiteResult.FailedCount} failed.");
-        }
-        catch (Exception ex)
-        {
-            _workflow.Steps[PipelineStep.Validate] = StepStatus.Failed;
-            Toasts.Error(ex.Message);
-        }
-        finally { _runningTests = false; await InvokeAsync(StateHasChanged); }
+        return Task.CompletedTask;
     }
 
     private RenderFragment RenderValidateStep() => __builder =>
@@ -1438,6 +1408,28 @@ else
     }
 
     // ── Style helpers ───────────────────────────────────────────────────
+
+    private async void OnTestRunUpdated(string ticketKey)
+    {
+        if (ticketKey != TicketKey) return;
+        var activeRun = TestRunner.GetActiveRun(ticketKey);
+        if (activeRun is not null)
+        {
+            _suiteResult = activeRun.Suite;
+            _runningTests = activeRun.IsRunning;
+            if (!activeRun.IsRunning)
+            {
+                _workflow.Steps[PipelineStep.Validate] = _suiteResult.AllPassed ? StepStatus.Passed : StepStatus.Failed;
+                await SaveWorkflowStateAsync();
+            }
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        TestRunner.RunUpdated -= OnTestRunUpdated;
+    }
 
     private static string StatusBadge(string status) =>
         "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border " +

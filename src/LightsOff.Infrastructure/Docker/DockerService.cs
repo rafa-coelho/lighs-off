@@ -76,6 +76,31 @@ public class DockerService : IDockerService, IAsyncDisposable
         return ((int)inspect.ExitCode, combined.Trim());
     }
 
+    public async Task<int> ExecStreamAsync(string containerId, IReadOnlyList<string> command, Func<string, Task> onChunk, CancellationToken ct = default)
+    {
+        var exec = await _client.Value.Exec.ExecCreateContainerAsync(containerId, new ContainerExecCreateParameters
+        {
+            Cmd = command.ToList(),
+            AttachStdout = true,
+            AttachStderr = true
+        }, ct).ConfigureAwait(false);
+
+        using var stream = await _client.Value.Exec.StartAndAttachContainerExecAsync(exec.ID, tty: false, ct)
+            .ConfigureAwait(false);
+
+        var buffer = new byte[4096];
+        while (true)
+        {
+            var result = await stream.ReadOutputAsync(buffer, 0, buffer.Length, ct).ConfigureAwait(false);
+            if (result.Count == 0) break;
+            var text = System.Text.Encoding.UTF8.GetString(buffer, 0, result.Count);
+            await onChunk(text).ConfigureAwait(false);
+        }
+
+        var inspect = await _client.Value.Exec.InspectContainerExecAsync(exec.ID, ct).ConfigureAwait(false);
+        return (int)inspect.ExitCode;
+    }
+
     private static (Dictionary<string, EmptyStruct> Exposed, Dictionary<string, IList<PortBinding>> Bindings)
         BuildPortMaps(IReadOnlyList<string>? ports)
     {
