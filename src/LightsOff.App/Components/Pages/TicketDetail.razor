@@ -871,6 +871,8 @@ else
                     _plan = loaded.Plan;
                     _workflow.Plan = _plan;
                     _suiteResult = loaded.TestResults;
+                    _review = loaded.Review;
+                    _submitResults = loaded.SubmitResults;
                     _changeSummary = loaded.Changes;
                     _activeStep = loaded.ActiveStep;
                 }
@@ -890,6 +892,8 @@ else
                 Analysis = _analysis,
                 Plan = _plan,
                 TestResults = _suiteResult,
+                Review = _review,
+                SubmitResults = _submitResults,
                 Changes = _changeSummary,
                 ActiveStep = _activeStep
             };
@@ -909,6 +913,8 @@ else
         public TicketAnalysis? Analysis { get; set; }
         public ImplementationPlan? Plan { get; set; }
         public TestSuiteResult? TestResults { get; set; }
+        public CodeReview? Review { get; set; }
+        public IReadOnlyList<PullRequestResult>? SubmitResults { get; set; }
         public ChangeSummary? Changes { get; set; }
         public PipelineStep ActiveStep { get; set; }
     }
@@ -1272,7 +1278,11 @@ else
             _workflow.Steps[PipelineStep.Review] = StepStatus.Failed;
             Toasts.Error($"Review failed: {ex.Message}");
         }
-        finally { _reviewing = false; }
+        finally
+        {
+            _reviewing = false;
+            await SaveWorkflowStateAsync();
+        }
     }
 
     // ── Submit Step ─────────────────────────────────────────────────────
@@ -1326,7 +1336,11 @@ else
             _workflow.Steps[PipelineStep.Submit] = StepStatus.Failed;
             Toasts.Error(ex.Message);
         }
-        finally { _submitting = false; }
+        finally
+        {
+            _submitting = false;
+            await SaveWorkflowStateAsync();
+        }
     }
 
     // ── Workspace Creation (when no workspace exists) ───────────────────
