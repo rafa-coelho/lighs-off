@@ -57,9 +57,25 @@ else
         <h1 class="text-2xl font-semibold tracking-tight">@_ticket.Summary</h1>
         @if (!string.IsNullOrEmpty(_ticket.Description))
         {
-            <div class="mt-3 text-sm text-zinc-400 prose prose-invert prose-sm max-w-none max-h-32 overflow-y-auto border border-zinc-800/80 rounded-lg p-3 bg-zinc-950/40">
-                @((MarkupString)(_ticket.Description ?? ""))
-            </div>
+            <details class="mt-3 group/desc">
+                <summary class="text-xs text-zinc-500 cursor-pointer hover:text-zinc-300 inline-flex items-center gap-1.5 mb-1">
+                    <Icon Name="chevron-right" Class="w-3 h-3 transition-transform group-open/desc:rotate-90" />
+                    Description
+                </summary>
+                <div class="text-sm text-zinc-300 leading-relaxed border-l-2 border-zinc-800 pl-4 ml-1 space-y-2
+                            [&_h1]:text-base [&_h1]:font-semibold [&_h1]:text-zinc-100 [&_h1]:mt-3
+                            [&_h2]:text-sm [&_h2]:font-semibold [&_h2]:text-zinc-200 [&_h2]:mt-3
+                            [&_h3]:text-xs [&_h3]:font-semibold [&_h3]:text-zinc-200 [&_h3]:uppercase [&_h3]:tracking-wider [&_h3]:mt-3
+                            [&_p]:text-zinc-400
+                            [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:text-zinc-400
+                            [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:text-zinc-400
+                            [&_li]:py-0.5
+                            [&_code]:text-emerald-400 [&_code]:text-xs [&_code]:font-mono [&_code]:bg-zinc-900 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded
+                            [&_a]:text-emerald-400 [&_a]:underline [&_a]:underline-offset-2
+                            [&_strong]:text-zinc-200 [&_strong]:font-semibold">
+                    @((MarkupString)(_ticket.Description ?? ""))
+                </div>
+            </details>
         }
     </div>
 
@@ -239,9 +255,14 @@ else
             _workflow.Analysis = _analysis;
             _workflow.Steps[PipelineStep.Analyze] = _analysis.HasErrors ? StepStatus.Warning : StepStatus.Passed;
 
-            _plan = await agent.GeneratePlanAsync(_ticket!, _analysis, contexts);
-            _workflow.Plan = _plan;
-            _workflow.Steps[PipelineStep.Plan] = StepStatus.AwaitingApproval;
+            // Only generate a new plan if one doesn't exist or was rejected.
+            // Approved/ChangesRequested plans are preserved.
+            if (_plan is null || _plan.Status is PlanStatus.Rejected || _plan.Status is PlanStatus.Draft)
+            {
+                _plan = await agent.GeneratePlanAsync(_ticket!, _analysis, contexts);
+                _workflow.Plan = _plan;
+                _workflow.Steps[PipelineStep.Plan] = StepStatus.AwaitingApproval;
+            }
 
             Toasts.Success($"Analysis complete: {_analysis.Gaps.Count} finding(s), {_analysis.Tasks.Count} task(s).");
             await SaveWorkflowStateAsync();
@@ -783,6 +804,7 @@ else
         finally
         {
             _checkingChanges = false;
+            await SaveWorkflowStateAsync();
             await InvokeAsync(StateHasChanged);
         }
     }
@@ -849,6 +871,7 @@ else
                     _plan = loaded.Plan;
                     _workflow.Plan = _plan;
                     _suiteResult = loaded.TestResults;
+                    _changeSummary = loaded.Changes;
                     _activeStep = loaded.ActiveStep;
                 }
             }
@@ -867,6 +890,7 @@ else
                 Analysis = _analysis,
                 Plan = _plan,
                 TestResults = _suiteResult,
+                Changes = _changeSummary,
                 ActiveStep = _activeStep
             };
             var json = JsonSerializer.Serialize(persist, _jsonOpts);
@@ -885,6 +909,7 @@ else
         public TicketAnalysis? Analysis { get; set; }
         public ImplementationPlan? Plan { get; set; }
         public TestSuiteResult? TestResults { get; set; }
+        public ChangeSummary? Changes { get; set; }
         public PipelineStep ActiveStep { get; set; }
     }
 
@@ -1420,6 +1445,11 @@ else
             if (!activeRun.IsRunning)
             {
                 _workflow.Steps[PipelineStep.Validate] = _suiteResult.AllPassed ? StepStatus.Passed : StepStatus.Failed;
+                // Auto-advance to next step
+                if (_suiteResult.AllPassed && _activeStep == PipelineStep.Validate)
+                {
+                    _activeStep = PipelineStep.Review;
+                }
                 await SaveWorkflowStateAsync();
             }
         }
