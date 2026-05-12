@@ -89,7 +89,8 @@ else
         var hasBlockingQuality = LightsOff.Infrastructure.Pipeline.TicketQualityChecker.HasBlockingConcerns(qualityGaps);
         var defaultAgentForChain = AgentProvider.GetDefaultAgent();
         var sessionCapableForChain = defaultAgentForChain.Id == LightsOff.Infrastructure.Agents.ClaudeCliAgent.AgentId
-                                  || defaultAgentForChain.Id == LightsOff.Infrastructure.Agents.CopilotCliAgent.AgentId;
+                                  || defaultAgentForChain.Id == LightsOff.Infrastructure.Agents.CopilotCliAgent.AgentId
+                                  || defaultAgentForChain.Id == LightsOff.Infrastructure.Demo.DemoCodeAgent.AgentIdConst;
         var chainIsActive = StepRunner.IsRunning(TicketKey);
         var canStartChain = sessionCapableForChain && (_plan?.IsApproved == true) && !chainIsActive;
 
@@ -1123,7 +1124,8 @@ else
         var activeImplementRun = activeRun is { Step: PipelineStep.Implement } ? activeRun : null;
         var defaultAgent = AgentProvider.GetDefaultAgent();
         var sessionCapable = defaultAgent.Id == LightsOff.Infrastructure.Agents.ClaudeCliAgent.AgentId
-                          || defaultAgent.Id == LightsOff.Infrastructure.Agents.CopilotCliAgent.AgentId;
+                          || defaultAgent.Id == LightsOff.Infrastructure.Agents.CopilotCliAgent.AgentId
+                          || defaultAgent.Id == LightsOff.Infrastructure.Demo.DemoCodeAgent.AgentIdConst;
         var canRunAi = sessionCapable && (_plan?.IsApproved == true);
 
         <div class="rounded-lg border border-zinc-800 bg-zinc-950/40 p-4 mb-4">

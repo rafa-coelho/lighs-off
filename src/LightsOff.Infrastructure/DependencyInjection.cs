@@ -3,6 +3,7 @@ using LightsOff.Core.Configuration;
 using LightsOff.Infrastructure.Configuration;
 using LightsOff.Infrastructure.Data;
 using LightsOff.Infrastructure.Agents;
+using LightsOff.Infrastructure.Demo;
 using LightsOff.Infrastructure.Docker;
 using LightsOff.Infrastructure.Git;
 using LightsOff.Infrastructure.GitHub;
@@ -24,6 +25,23 @@ public static class DependencyInjection
         IConfiguration configuration)
     {
         services.Configure<LightsOffOptions>(configuration.GetSection(LightsOffOptions.SectionName));
+
+        var isDemo = IsDemoMode(configuration);
+        if (isDemo)
+        {
+            // Route state/repos/workspaces under ~/.lightsoff-demo/ so the real state.db stays
+            // untouched. The user can wipe the demo dir between presentations without risk.
+            services.PostConfigure<LightsOffOptions>(opts =>
+            {
+                var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                var demoRoot = Path.Combine(home, ".lightsoff-demo");
+                opts.StateRoot = demoRoot;
+                opts.WorkspacesRoot = Path.Combine(demoRoot, "workspaces");
+                opts.ReposRoot = Path.Combine(demoRoot, "repos");
+                opts.ActiveBoardId = DemoFixtures.BoardId;
+            });
+        }
+
         services.AddHttpClient(JiraClient.HttpClientName);
         services.AddHttpClient(GitHubClient.HttpClientName);
 
@@ -38,22 +56,51 @@ public static class DependencyInjection
         services.AddSingleton<ISecretStore, FileSecretStore>();
         services.AddScoped<IAppSettingsStore, AppSettingsStore>();
         services.AddScoped<IJiraConnectionProvider, JiraConnectionProvider>();
-        services.AddScoped<IJiraClient, JiraClient>();
-        services.AddScoped<IGitHubClient, GitHubClient>();
-        services.AddScoped<IGitService, LibGit2Service>();
-        services.AddSingleton<IDockerService, DockerService>();
         services.AddScoped<IRepositoryRegistry, RepositoryRegistry>();
         services.AddSingleton<Workspaces.RepoConfigLoader>();
-        services.AddScoped<LocalCodeAgent>();
-        services.AddScoped<ICodeAgent>(sp => sp.GetRequiredService<LocalCodeAgent>());
-        services.AddScoped<ICodeAgent, ClaudeCodeAgent>();
-        services.AddScoped<ICodeAgent, ClaudeCliAgent>();
-        services.AddScoped<ICodeAgent, CopilotCliAgent>();
-        services.AddScoped<ICodeAgentProvider, CodeAgentProvider>();
-        services.AddScoped<IWorkspaceManager, WorkspaceManager>();
-        services.AddScoped<IPipelineOrchestrator, PipelineOrchestrator>();
+
+        if (isDemo)
+        {
+            services.AddScoped<IJiraClient, DemoJiraClient>();
+            services.AddScoped<IGitHubClient, DemoGitHubClient>();
+            services.AddScoped<IGitService, DemoGitService>();
+            services.AddSingleton<IDockerService, DemoDockerService>();
+            services.AddScoped<ICodeAgent, DemoCodeAgent>();
+            services.AddScoped<ICodeAgentProvider, CodeAgentProvider>();
+            services.AddScoped<IWorkspaceManager, DemoWorkspaceManager>();
+            services.AddScoped<IPipelineOrchestrator, DemoPipelineOrchestrator>();
+            services.AddHostedService<DemoSettingsSeeder>();
+        }
+        else
+        {
+            services.AddScoped<IJiraClient, JiraClient>();
+            services.AddScoped<IGitHubClient, GitHubClient>();
+            services.AddScoped<IGitService, LibGit2Service>();
+            services.AddSingleton<IDockerService, DockerService>();
+            services.AddScoped<LocalCodeAgent>();
+            services.AddScoped<ICodeAgent>(sp => sp.GetRequiredService<LocalCodeAgent>());
+            services.AddScoped<ICodeAgent, ClaudeCodeAgent>();
+            services.AddScoped<ICodeAgent, ClaudeCliAgent>();
+            services.AddScoped<ICodeAgent, CopilotCliAgent>();
+            services.AddScoped<ICodeAgentProvider, CodeAgentProvider>();
+            services.AddScoped<IWorkspaceManager, WorkspaceManager>();
+            services.AddScoped<IPipelineOrchestrator, PipelineOrchestrator>();
+        }
 
         return services;
+    }
+
+    /// <summary>
+    /// Demo mode is on when either <c>LightsOff:DemoMode</c> is true in configuration or the
+    /// <c>LIGHTSOFF_DEMO</c> env var is set to a truthy value. The env var is the convenient
+    /// switch for a presentation laptop where editing appsettings.json is overkill.
+    /// </summary>
+    private static bool IsDemoMode(IConfiguration configuration)
+    {
+        if (configuration.GetValue<bool>("LightsOff:DemoMode")) return true;
+        var env = Environment.GetEnvironmentVariable("LIGHTSOFF_DEMO");
+        return !string.IsNullOrWhiteSpace(env)
+               && env is not "0" and not "false" and not "False" and not "FALSE";
     }
 
     public static async Task EnsureDatabaseCreatedAsync(this IServiceProvider serviceProvider, CancellationToken ct = default)
