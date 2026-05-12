@@ -1,9 +1,11 @@
 @page "/settings"
+@using LightsOff.Infrastructure.Agents
 @inject IJiraConnectionProvider JiraProvider
 @inject IJiraClient Jira
 @inject IGitHubClient GitHub
 @inject ISecretStore Secrets
 @inject IAppSettingsStore AppSettings
+@inject ICodeAgentProvider AgentProvider
 @inject ToastService Toasts
 
 <PageTitle>Settings</PageTitle>
@@ -168,6 +170,38 @@
             </div>
         </div>
     </section>
+
+    <!-- Code agent card -->
+    <section class="rounded-xl border border-zinc-800/80 bg-zinc-900/40 overflow-hidden lg:col-span-2">
+        <header class="px-6 py-4 border-b border-zinc-800/80">
+            <h2 class="font-semibold">Code agent</h2>
+            <p class="text-xs text-zinc-500 mt-0.5">Which agent drives Analyze, Plan, and Implement. Selection is per-install.</p>
+        </header>
+        <div class="p-6 space-y-2">
+            @foreach (var agent in AgentProvider.AvailableAgents)
+            {
+                var isSelected = string.Equals(agent.Id, _defaultAgentId, StringComparison.OrdinalIgnoreCase);
+                var available = agent.IsAvailable;
+                <label class="flex items-start gap-3 p-3 rounded-lg border @(isSelected ? "border-emerald-500/50 bg-emerald-500/5" : "border-zinc-800 bg-zinc-950/40") @(available ? "cursor-pointer" : "cursor-not-allowed opacity-60")">
+                    <input type="radio" name="default-agent" value="@agent.Id"
+                           checked="@isSelected" disabled="@(!available)"
+                           @onchange="@(_ => OnAgentSelectedAsync(agent.Id))"
+                           class="mt-1 accent-emerald-500" />
+                    <div class="flex-1 min-w-0">
+                        <div class="flex items-center gap-2">
+                            <span class="text-sm font-medium">@agent.DisplayName</span>
+                            <code class="text-[10px] text-zinc-500">@agent.Id</code>
+                            @if (!available)
+                            {
+                                <span class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/30">unavailable</span>
+                            }
+                        </div>
+                        <div class="text-xs text-zinc-500 mt-0.5">@AgentHint(agent.Id, available)</div>
+                    </div>
+                </label>
+            }
+        </div>
+    </section>
 </div>
 
 @code {
@@ -186,8 +220,11 @@
     private bool _loadingOrgs;
     private string? _orgsError;
 
+    private string _defaultAgentId = "local";
+
     protected override async Task OnInitializedAsync()
     {
+        _defaultAgentId = await AppSettings.GetAsync(AppSettingsKeys.DefaultAgent) ?? "local";
         var connection = await JiraProvider.GetAsync();
         if (connection is not null)
         {
@@ -324,4 +361,26 @@
         _selectedOrgs.Clear();
         Toasts.Info("GitHub PAT removed.");
     }
+
+    private async Task OnAgentSelectedAsync(string agentId)
+    {
+        await AppSettings.SetAsync(AppSettingsKeys.DefaultAgent, agentId);
+        _defaultAgentId = agentId;
+        Toasts.Success($"Default agent set to '{agentId}'.");
+    }
+
+    private static string AgentHint(string agentId, bool available) => agentId switch
+    {
+        "local" => "Heuristics-only: file-system scan + rules. No network, no AI. Good baseline.",
+        ClaudeCliAgent.AgentId => available
+            ? "Uses the host's `claude` CLI — same login and MCP setup as running Claude Code from the terminal. Required for AI Implement."
+            : "Install Claude Code on the host and run `claude login` — then refresh this page.",
+        CopilotCliAgent.AgentId => available
+            ? "Uses GitHub Copilot CLI for Analyze, Plan, Rework and Review. Streaming sessions (Implement step) not yet supported — pair with claude-cli for full autonomy."
+            : "Install with `npm install -g @github/copilot --registry=https://registry.npmjs.org/`, then run `copilot login`.",
+        "claude" => available
+            ? "Anthropic API (direct). Pending full implementation in Phase 2."
+            : "Add an Anthropic API key below.",
+        _ => ""
+    };
 }

@@ -8,6 +8,7 @@ using LightsOff.Infrastructure.Git;
 using LightsOff.Infrastructure.GitHub;
 using LightsOff.Infrastructure.Jira;
 using LightsOff.Infrastructure.Registry;
+using LightsOff.Infrastructure.Pipeline;
 using LightsOff.Infrastructure.Secrets;
 using LightsOff.Infrastructure.Workspaces;
 using Microsoft.EntityFrameworkCore;
@@ -46,8 +47,11 @@ public static class DependencyInjection
         services.AddScoped<LocalCodeAgent>();
         services.AddScoped<ICodeAgent>(sp => sp.GetRequiredService<LocalCodeAgent>());
         services.AddScoped<ICodeAgent, ClaudeCodeAgent>();
+        services.AddScoped<ICodeAgent, ClaudeCliAgent>();
+        services.AddScoped<ICodeAgent, CopilotCliAgent>();
         services.AddScoped<ICodeAgentProvider, CodeAgentProvider>();
         services.AddScoped<IWorkspaceManager, WorkspaceManager>();
+        services.AddScoped<IPipelineOrchestrator, PipelineOrchestrator>();
 
         return services;
     }
@@ -88,6 +92,52 @@ public static class DependencyInjection
                 "RuntimesJson" TEXT NOT NULL DEFAULT '[]',
                 "PackageInstallCommandsJson" TEXT NOT NULL DEFAULT '[]',
                 "CustomCommandsJson" TEXT NOT NULL DEFAULT '[]'
+            )
+            """, ct).ConfigureAwait(false);
+
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "StepRuns" (
+                "Id" TEXT NOT NULL PRIMARY KEY,
+                "TicketKey" TEXT NOT NULL,
+                "Step" TEXT NOT NULL,
+                "Status" TEXT NOT NULL,
+                "AgentId" TEXT NOT NULL,
+                "StartedAt" INTEGER NOT NULL,
+                "FinishedAt" INTEGER NULL,
+                "CancellationReason" TEXT NULL,
+                "ParentRunId" TEXT NULL,
+                "SummaryJson" TEXT NULL
+            )
+            """, ct).ConfigureAwait(false);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX IF NOT EXISTS "IX_StepRuns_TicketKey_Step" ON "StepRuns" ("TicketKey", "Step")""",
+            ct).ConfigureAwait(false);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE INDEX IF NOT EXISTS "IX_StepRuns_ParentRunId" ON "StepRuns" ("ParentRunId")""",
+            ct).ConfigureAwait(false);
+
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "StepEventLog" (
+                "Id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                "StepRunId" TEXT NOT NULL,
+                "Seq" INTEGER NOT NULL,
+                "At" INTEGER NOT NULL,
+                "Kind" TEXT NOT NULL,
+                "PayloadJson" TEXT NOT NULL
+            )
+            """, ct).ConfigureAwait(false);
+        await db.Database.ExecuteSqlRawAsync(
+            """CREATE UNIQUE INDEX IF NOT EXISTS "IX_StepEventLog_StepRunId_Seq" ON "StepEventLog" ("StepRunId", "Seq")""",
+            ct).ConfigureAwait(false);
+
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS "RepoAnalysisCache" (
+                "RepoName" TEXT NOT NULL,
+                "HeadSha" TEXT NOT NULL,
+                "AnalyzedAt" INTEGER NOT NULL,
+                "AgentId" TEXT NOT NULL,
+                "ContextJson" TEXT NOT NULL,
+                PRIMARY KEY ("RepoName", "HeadSha")
             )
             """, ct).ConfigureAwait(false);
     }

@@ -16,4 +16,29 @@ public interface IGitService
     /// Used for change detection: "did someone else push while I was away?"
     /// </summary>
     Task<int> CountNewUpstreamCommitsAsync(string repoPath, string defaultBranch, string excludeAuthor, CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns the full SHA of HEAD. Used to key the repo-analysis cache so we skip re-analysis
+    /// when HEAD hasn't moved since the last run.
+    /// </summary>
+    Task<string> GetHeadShaAsync(string repoPath, CancellationToken ct = default);
+
+    /// <summary>
+    /// Stage all changes in the working tree and create a commit with the supplied message
+    /// + author identity. No-ops cleanly if there's nothing to commit (returns false). Returns
+    /// the commit SHA on success.
+    /// </summary>
+    Task<string?> CommitAllAsync(
+        string repoPath,
+        string message,
+        string authorName,
+        string authorEmail,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns the list of paths with uncommitted changes (modified, added, deleted, untracked).
+    /// Used to surface the diff context to the commit-message prompt and to decide whether
+    /// commit should run at all.
+    /// </summary>
+    Task<IReadOnlyList<string>> GetUncommittedFilesAsync(string repoPath, CancellationToken ct = default);
 }

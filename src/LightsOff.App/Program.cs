@@ -2,6 +2,7 @@ using LightsOff.App.Api;
 using LightsOff.App.Components;
 using LightsOff.App.Services;
 using LightsOff.App.Workers;
+using LightsOff.Core.Abstractions;
 using LightsOff.Core.Configuration;
 using LightsOff.Infrastructure;
 using Microsoft.Extensions.Options;
@@ -50,7 +51,10 @@ try
         .AddInteractiveServerComponents();
 
     builder.Services.AddScoped<ToastService>();
+    builder.Services.AddSingleton<MarkdownRenderer>();
     builder.Services.AddSingleton<TestRunnerService>();
+    builder.Services.AddSingleton<StepRunnerService>();
+    builder.Services.AddSingleton<IStepSessionSink>(sp => sp.GetRequiredService<StepRunnerService>());
     builder.Services.AddLightsOffInfrastructure(builder.Configuration);
 
     builder.Services.AddHostedService<WorkspaceHealthWorker>();

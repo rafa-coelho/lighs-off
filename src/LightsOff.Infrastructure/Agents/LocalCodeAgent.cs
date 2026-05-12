@@ -268,6 +268,7 @@ public partial class LocalCodeAgent : ICodeAgent
     public Task<TicketAnalysis> AnalyzeTicketAsync(
         Ticket ticket,
         IReadOnlyList<RepoContext> repoContexts,
+        IProgress<string>? progress = null,
         CancellationToken ct = default)
     {
         var gaps = new List<Gap>();
@@ -391,6 +392,7 @@ public partial class LocalCodeAgent : ICodeAgent
         Ticket ticket,
         TicketAnalysis analysis,
         IReadOnlyList<RepoContext> repoContexts,
+        IProgress<string>? progress = null,
         CancellationToken ct = default)
     {
         var plan = new ImplementationPlan
@@ -413,7 +415,7 @@ public partial class LocalCodeAgent : ICodeAgent
                 .ToList(),
             OpenQuestions = analysis.Gaps
                 .Where(g => g.Severity == GapSeverity.Error)
-                .Select(g => g.Detail)
+                .Select(g => new OpenQuestion(g.Detail, Array.Empty<string>()))
                 .ToList()
         };
 

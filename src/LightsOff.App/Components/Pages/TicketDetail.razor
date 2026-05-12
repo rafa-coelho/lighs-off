@@ -17,6 +17,8 @@
 @inject ToastService Toasts
 @inject NavigationManager Nav
 @inject TestRunnerService TestRunner
+@inject StepRunnerService StepRunner
+@inject MarkdownRenderer Markdown
 @inject IJSRuntime JS
 @implements IDisposable
 
@@ -81,26 +83,88 @@ else
 
     @if (_workspace is not null)
     {
+        var qualityGaps = _ticket is not null
+            ? LightsOff.Infrastructure.Pipeline.TicketQualityChecker.Check(_ticket)
+            : (IReadOnlyList<Gap>)Array.Empty<Gap>();
+        var hasBlockingQuality = LightsOff.Infrastructure.Pipeline.TicketQualityChecker.HasBlockingConcerns(qualityGaps);
+        var defaultAgentForChain = AgentProvider.GetDefaultAgent();
+        var sessionCapableForChain = defaultAgentForChain.Id == LightsOff.Infrastructure.Agents.ClaudeCliAgent.AgentId
+                                  || defaultAgentForChain.Id == LightsOff.Infrastructure.Agents.CopilotCliAgent.AgentId;
+        var chainIsActive = StepRunner.IsRunning(TicketKey);
+        var canStartChain = sessionCapableForChain && (_plan?.IsApproved == true) && !chainIsActive;
+
+        <!-- Pre-flight: ticket-quality warning banner. Warn-only; never blocks. -->
+        @if (hasBlockingQuality && !_dismissedQualityWarning)
+        {
+            <div class="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3">
+                <div class="flex items-start gap-3">
+                    <Icon Name="alert" Class="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
+                    <div class="flex-1 min-w-0">
+                        <div class="text-sm font-semibold text-amber-200">Ticket quality may be low</div>
+                        <ul class="mt-1.5 space-y-0.5 text-xs text-amber-300/80">
+                            @foreach (var g in qualityGaps.Where(g => g.Severity == GapSeverity.Error))
+                            {
+                                <li>• @g.Detail</li>
+                            }
+                        </ul>
+                        <div class="mt-2 flex gap-2">
+                            <button type="button" @onclick="() => _dismissedQualityWarning = true"
+                                    class="text-[11px] px-2.5 py-1 rounded border border-amber-700/50 text-amber-200 hover:bg-amber-950/40">
+                                Proceed anyway
+                            </button>
+                            <button type="button" @onclick="LoadTicketAsync"
+                                    class="text-[11px] px-2.5 py-1 rounded border border-zinc-800 text-zinc-300 hover:bg-zinc-800/40">
+                                Refresh from Jira
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        }
+
+        <!-- Autonomous chain CTA. Visible when plan is approved + agent is session-capable. -->
+        @if (sessionCapableForChain && _plan?.IsApproved == true)
+        {
+            <div class="mb-4 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 flex items-center justify-between gap-4">
+                <div class="text-sm">
+                    <div class="font-semibold text-emerald-200">Autonomous run</div>
+                    <div class="text-xs text-emerald-300/70">Implement → Validate → Commit → Submit, hands-off. Cancel any time.</div>
+                </div>
+                @if (chainIsActive)
+                {
+                    <button type="button" @onclick="CancelImplementRunAsync"
+                            class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-xs text-red-300 hover:text-red-200 border border-red-900/60 hover:bg-red-950/40 transition-colors">
+                        <Icon Name="x" Class="w-3 h-3" /> Cancel chain
+                    </button>
+                }
+                else
+                {
+                    <button type="button" @onclick="StartAutonomousChainAsync" disabled="@(!canStartChain)"
+                            class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-xs bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                        <Icon Name="play" Class="w-3 h-3" /> Start autonomous run
+                    </button>
+                }
+            </div>
+        }
+
         <!-- Pipeline view -->
         <PipelineStepper State="_workflow" ActiveStep="_activeStep" OnStepClick="SetActiveStep" />
 
         <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/40 p-6">
             @switch (_activeStep)
             {
+                // Analyze + Plan are merged into a single "Understand & Plan" view.
                 case PipelineStep.Analyze:
-                    @RenderAnalyzeStep()
-                    break;
                 case PipelineStep.Plan:
                     @RenderPlanStep()
                     break;
                 case PipelineStep.Implement:
                     @RenderImplementStep()
                     break;
+                // Review is folded into Validate.
                 case PipelineStep.Validate:
-                    @RenderValidateStep()
-                    break;
                 case PipelineStep.Review:
-                    @RenderReviewStep()
+                    @RenderValidateStep()
                     break;
                 case PipelineStep.Submit:
                     @RenderSubmitStep()
@@ -124,7 +188,7 @@ else
     private Ticket? _ticket;
     private Workspace? _workspace;
     private WorkflowState _workflow = new();
-    private PipelineStep _activeStep = PipelineStep.Analyze;
+    private PipelineStep _activeStep = PipelineStep.Plan;
     private LoadState _loadState = LoadState.Loading;
     private string? _loadError;
     private bool? _dockerAvailable;
@@ -132,10 +196,12 @@ else
     // Analysis state
     private TicketAnalysis? _analysis;
     private bool _analyzing;
+    private string _streamingText = string.Empty;
 
     // Plan state
     private ImplementationPlan? _plan;
     private string _planComment = string.Empty;
+    private bool _planPanelOpen;
 
     // Validate state
     private List<RepoTestConfig> _testConfigs = new();
@@ -194,23 +260,24 @@ else
             if (_workspace is not null)
             {
                 LoadWorkflowState();
+                await RestoreQuestionsStateAsync();
                 await LoadTestConfigsAsync();
                 await LoadDepProfilesAsync();
 
                 // Subscribe to test runner for live updates (survives F5)
                 TestRunner.RunUpdated -= OnTestRunUpdated; // prevent double-subscribe
                 TestRunner.RunUpdated += OnTestRunUpdated;
+                StepRunner.RunUpdated -= OnStepRunUpdated;
+                StepRunner.RunUpdated += OnStepRunUpdated;
                 var activeRun = TestRunner.GetActiveRun(TicketKey);
                 if (activeRun is not null)
                 {
                     _suiteResult = activeRun.Suite;
                     _runningTests = activeRun.IsRunning;
                 }
-                // Only auto-analyze if no saved state exists (first time opening this ticket)
+                // Fire AI work in the background — page renders immediately.
                 if (_workflow.Steps[PipelineStep.Analyze] == StepStatus.Pending)
-                {
-                    await RunAnalysisAsync();
-                }
+                    _ = InvokeAsync(RunAnalysisAsync);
             }
             else
             {
@@ -228,13 +295,18 @@ else
 
     // ── Analyze Step ────────────────────────────────────────────────────
 
-    private async Task RunAnalysisAsync()
+    private bool _refiningAnalysis;
+
+    private async Task OnAnalyzeChatSendAsync(string text)
     {
-        _analyzing = true;
-        _analysis = null;
-        _plan = null;
+        if (_analysis is null || _ticket is null) return;
+        if (_refiningAnalysis) return;
+
+        _analysis.Conversation.Add(new ChatMessage(ChatMessage.RoleUser, text, DateTimeOffset.UtcNow));
+        _refiningAnalysis = true;
+        await SaveWorkflowStateAsync();
         await InvokeAsync(StateHasChanged);
-        await Task.Yield();
+
         try
         {
             var agent = AgentProvider.GetDefaultAgent();
@@ -251,21 +323,95 @@ else
                     }
                 }
             }
-            _analysis = await agent.AnalyzeTicketAsync(_ticket!, contexts);
+
+            var refined = await agent.RefineAnalysisAsync(_ticket, _analysis, _analysis.Conversation, contexts);
+            // Carry conversation forward + append agent's brief reply summarizing what changed.
+            refined.Conversation = _analysis.Conversation.ToList();
+            refined.Conversation.Add(new ChatMessage(
+                ChatMessage.RoleAgent,
+                BuildAnalysisDeltaSummary(_analysis, refined),
+                DateTimeOffset.UtcNow));
+            _analysis = refined;
             _workflow.Analysis = _analysis;
             _workflow.Steps[PipelineStep.Analyze] = _analysis.HasErrors ? StepStatus.Warning : StepStatus.Passed;
+            await SaveWorkflowStateAsync();
+        }
+        catch (NotSupportedException)
+        {
+            _analysis.Conversation.Add(new ChatMessage(
+                ChatMessage.RoleSystem,
+                "This agent doesn't support analysis refinement. Switch to claude-cli in Settings.",
+                DateTimeOffset.UtcNow));
+            await SaveWorkflowStateAsync();
+        }
+        catch (Exception ex)
+        {
+            _analysis.Conversation.Add(new ChatMessage(
+                ChatMessage.RoleSystem,
+                $"Refinement failed: {ex.Message}",
+                DateTimeOffset.UtcNow));
+            Toasts.Error($"Refinement failed: {ex.Message}");
+            await SaveWorkflowStateAsync();
+        }
+        finally
+        {
+            _refiningAnalysis = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
 
-            // Only generate a new plan if one doesn't exist or was rejected.
-            // Approved/ChangesRequested plans are preserved.
-            if (_plan is null || _plan.Status is PlanStatus.Rejected || _plan.Status is PlanStatus.Draft)
+    private static string BuildAnalysisDeltaSummary(TicketAnalysis before, TicketAnalysis after)
+    {
+        var parts = new List<string>();
+        var resolved = before.Gaps.Count - after.Gaps.Count;
+        if (resolved > 0) parts.Add($"resolved {resolved} gap(s)");
+        if (after.Tasks.Count != before.Tasks.Count)
+            parts.Add($"tasks: {before.Tasks.Count} → {after.Tasks.Count}");
+        if (after.RelevantFiles.Count != before.RelevantFiles.Count)
+            parts.Add($"relevant files: {before.RelevantFiles.Count} → {after.RelevantFiles.Count}");
+        return parts.Count == 0
+            ? "Analysis updated."
+            : "Analysis updated — " + string.Join(", ", parts) + ".";
+    }
+
+    private async Task RunAnalysisAsync()
+    {
+        _analyzing = true;
+        _analysis = null;
+        _plan = null;
+        _streamingText = string.Empty;
+        await InvokeAsync(StateHasChanged);
+        await Task.Yield();
+        try
+        {
+            var agent = AgentProvider.GetDefaultAgent();
+            var contexts = await GetRepoContextsAsync(agent);
+
+            var analysisProgress = new Progress<string>(chunk =>
             {
-                _plan = await agent.GeneratePlanAsync(_ticket!, _analysis, contexts);
-                _workflow.Plan = _plan;
-                _workflow.Steps[PipelineStep.Plan] = StepStatus.AwaitingApproval;
+                _streamingText += chunk;
+                InvokeAsync(StateHasChanged);
+            });
+            _analysis = await agent.AnalyzeTicketAsync(_ticket!, contexts, analysisProgress);
+            _workflow.Analysis = _analysis;
+            _workflow.Steps[PipelineStep.Analyze] = _analysis.HasErrors ? StepStatus.Warning : StepStatus.Passed;
+            await SaveWorkflowStateAsync();
+            await InvokeAsync(StateHasChanged);
+
+            // Decision point: do we have blocking analysis questions? If yes, post them as an
+            // inline question card in the chat thread. The plan only generates after the user
+            // answers (or skips) them — answered Q+A pairs become user chat messages that the
+            // refine-analysis prompt sees as conversation history.
+            var analysisQuestions = ExtractAnalysisQuestions(_analysis);
+            if (analysisQuestions.Count > 0)
+            {
+                PostQuestionsToChat(QuestionPhase.Analysis, analysisQuestions);
+                await SaveWorkflowStateAsync();
+                return;
             }
 
-            Toasts.Success($"Analysis complete: {_analysis.Gaps.Count} finding(s), {_analysis.Tasks.Count} task(s).");
-            await SaveWorkflowStateAsync();
+            // No analysis blockers → generate the plan straight away.
+            await GeneratePlanFromAnalysisAsync(agent, contexts);
         }
         catch (Exception ex)
         {
@@ -279,167 +425,469 @@ else
         }
     }
 
-    private RenderFragment RenderAnalyzeStep() => __builder =>
+    private async Task<List<RepoContext>> GetRepoContextsAsync(ICodeAgent agent)
     {
-        <h3 class="text-sm font-semibold mb-4">Analysis</h3>
-        @if (_analyzing)
+        var contexts = new List<RepoContext>();
+        if (_workspace?.Links is not null)
         {
-            <div class="flex items-center gap-3 text-sm text-zinc-500 py-6"><Spinner /> Analyzing ticket + repos…</div>
-        }
-        else if (_analysis is not null)
-        {
-            @if (_analysis.Gaps.Count > 0)
+            foreach (var link in _workspace.Links)
             {
-                <div class="mb-4 space-y-1.5">
-                    @foreach (var gap in _analysis.Gaps)
+                var repoPath = Path.Combine(_options.ReposRoot, link.RepositoryName);
+                if (Directory.Exists(repoPath))
+                {
+                    try { contexts.Add(await agent.AnalyzeRepositoryAsync(repoPath, ct: default)); }
+                    catch { }
+                }
+            }
+        }
+        return contexts;
+    }
+
+    /// <summary>
+    /// Pull blocking concerns from the analysis — Error gaps phrased as questions. Surfaced as
+    /// inline question cards in the chat thread before plan generation runs.
+    /// </summary>
+    private static IReadOnlyList<OpenQuestion> ExtractAnalysisQuestions(TicketAnalysis analysis)
+    {
+        // Prefer agent-generated questions (with suggestions) over raw gap conversion.
+        if (analysis.OpenQuestions.Count > 0)
+            return analysis.OpenQuestions;
+
+        // Fallback for older persisted analyses that pre-date openQuestions.
+        return analysis.Gaps
+            .Where(g => g.Severity == GapSeverity.Error)
+            .Select(g => new OpenQuestion(g.Detail, Array.Empty<string>()))
+            .ToList();
+    }
+
+    private async Task GeneratePlanFromAnalysisAsync(ICodeAgent agent, List<RepoContext> contexts)
+    {
+        if (_analysis is null || _ticket is null) return;
+
+        _generatingPlan = true;
+        _streamingText = string.Empty;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            // Approved/ChangesRequested plans are preserved across re-runs; only fresh-draft slots
+            // get overwritten.
+            if (_plan is null || _plan.Status is PlanStatus.Rejected or PlanStatus.Draft)
+            {
+                var planProgress = new Progress<string>(chunk =>
+                {
+                    _streamingText += chunk;
+                    InvokeAsync(StateHasChanged);
+                });
+                _plan = await agent.GeneratePlanAsync(_ticket, _analysis, contexts, planProgress);
+                _workflow.Plan = _plan;
+                _workflow.Steps[PipelineStep.Plan] = StepStatus.AwaitingApproval;
+                PostPlanCardToChat();
+                await SaveWorkflowStateAsync();
+            }
+
+            // Plan may carry its own OpenQuestions — surface them as a question card in the chat.
+            if (_plan is not null && _plan.OpenQuestions.Count > 0)
+            {
+                PostQuestionsToChat(QuestionPhase.Plan, _plan.OpenQuestions);
+            }
+        }
+        catch (Exception ex)
+        {
+            _workflow.Steps[PipelineStep.Plan] = StepStatus.Failed;
+            Toasts.Error($"Plan generation failed: {ex.Message}");
+            _analysis?.Conversation.Add(new ChatMessage(
+                ChatMessage.RoleSystem,
+                $"Plan generation failed: {ex.Message}",
+                DateTimeOffset.UtcNow));
+            // Persist so the error survives reloads (and so we don't auto-retry forever).
+            try { await SaveWorkflowStateAsync(); } catch { }
+        }
+        finally
+        {
+            _generatingPlan = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task RetryGeneratePlanAsync()
+    {
+        try
+        {
+            var agent = AgentProvider.GetDefaultAgent();
+            var contexts = await GetRepoContextsAsync(agent);
+            await GeneratePlanFromAnalysisAsync(agent, contexts);
+        }
+        catch (Exception ex)
+        {
+            // Fire-and-forget tasks must catch their own exceptions — otherwise they vanish.
+            _analysis?.Conversation.Add(new ChatMessage(
+                ChatMessage.RoleSystem,
+                $"Plan generation failed: {ex.Message}",
+                DateTimeOffset.UtcNow));
+            await SaveWorkflowStateAsync();
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    // ── Inline question card state + handlers ───────────────────────────
+
+    private bool _generatingPlan;
+    private string? _activeQuestionsBatchId;
+    private QuestionPhase _activeQuestionsPhase;
+
+    private enum QuestionPhase { Analysis, Plan }
+
+    /// <summary>
+    /// Append an agent chat message carrying a question batch as an inline attachment. The user
+    /// answers via the <c>ChatQuestionCard</c> rendered inside that message.
+    /// </summary>
+    private void PostQuestionsToChat(QuestionPhase phase, IReadOnlyList<OpenQuestion> questions)
+    {
+        if (_analysis is null || questions.Count == 0) return;
+
+        var batchId = Guid.NewGuid().ToString("N");
+        var payload = new QuestionsPayload
+        {
+            BatchId = batchId,
+            Questions = questions.ToList(),
+            Answers = new(),
+            Closed = false
+        };
+        var narrative = phase == QuestionPhase.Analysis
+            ? $"I have {questions.Count} question{(questions.Count == 1 ? "" : "s")} before drafting the plan."
+            : $"The plan has {questions.Count} open question{(questions.Count == 1 ? "" : "s")}. Answer them inline so I can refine.";
+
+        _analysis.Conversation.Add(new ChatMessage(
+            ChatMessage.RoleAgent,
+            narrative,
+            DateTimeOffset.UtcNow,
+            new ChatAttachment(
+                ChatAttachment.KindQuestions,
+                $"{questions.Count} question{(questions.Count == 1 ? "" : "s")}",
+                null,
+                JsonSerializer.Serialize(payload, _jsonOpts))));
+
+        _activeQuestionsBatchId = batchId;
+        _activeQuestionsPhase = phase;
+    }
+
+    /// <summary>
+    /// User submitted an answer to a specific question in a batch. Mutate the batch's payload,
+    /// re-serialize the attachment, append a user chat message echoing the Q+A, and finalize
+    /// the batch when all questions are answered or skipped.
+    /// </summary>
+    private async Task OnQuestionSubmit((string BatchId, int Index, string Answer) args)
+    {
+        var batch = FindActiveBatchPayload(args.BatchId);
+        if (batch is null || _analysis is null) return;
+
+        batch.Answers[args.Index] = args.Answer;
+        UpdateBatchAttachmentJson(args.BatchId, batch);
+        await SaveWorkflowStateAsync();
+        await InvokeAsync(StateHasChanged);
+
+        await TryFinalizeBatchAsync(batch);
+    }
+
+    private async Task OnQuestionSkipped((string BatchId, int Index) args)
+    {
+        var batch = FindActiveBatchPayload(args.BatchId);
+        if (batch is null || _analysis is null) return;
+
+        batch.Answers[args.Index] = string.Empty;
+        UpdateBatchAttachmentJson(args.BatchId, batch);
+        await SaveWorkflowStateAsync();
+        await InvokeAsync(StateHasChanged);
+
+        await TryFinalizeBatchAsync(batch);
+    }
+
+    private async Task OnQuestionsDismissed(string batchId)
+    {
+        var batch = FindActiveBatchPayload(batchId);
+        if (batch is null) return;
+
+        // Mark unanswered questions as skipped (empty), then finalize.
+        for (var i = 0; i < batch.Questions.Count; i++)
+            if (!batch.Answers.ContainsKey(i)) batch.Answers[i] = string.Empty;
+        UpdateBatchAttachmentJson(batchId, batch);
+
+        await TryFinalizeBatchAsync(batch);
+    }
+
+    /// <summary>
+    /// When all questions in a batch are answered (including skipped), close the batch and fire
+    /// the appropriate next-phase handler — refine analysis + generate plan, or rework plan.
+    /// </summary>
+    private async Task TryFinalizeBatchAsync(QuestionsPayload batch)
+    {
+        if (batch.Answers.Count < batch.Questions.Count) return;  // still pending
+
+        batch.Closed = true;
+        UpdateBatchAttachmentJson(batch.BatchId, batch);
+        _activeQuestionsBatchId = null;
+
+        // Post all Q&A pairs as a single user message now that the batch is complete.
+        if (_analysis is not null)
+        {
+            var lines = new System.Text.StringBuilder();
+            for (var i = 0; i < batch.Questions.Count; i++)
+            {
+                var qText = batch.Questions[i].Text;
+                var aText = batch.Answers.TryGetValue(i, out var a) ? a : string.Empty;
+                lines.AppendLine($"**{qText}**");
+                lines.AppendLine(string.IsNullOrEmpty(aText) ? "_(skipped — let the agent decide)_" : aText);
+                if (i < batch.Questions.Count - 1) lines.AppendLine();
+            }
+            _analysis.Conversation.Add(new ChatMessage(ChatMessage.RoleUser, lines.ToString().TrimEnd(), DateTimeOffset.UtcNow));
+        }
+
+        // Show pending state IMMEDIATELY — the slow work (save, repo contexts, refine, plan) is
+        // about to start and the user must see the agent is "thinking" right after their answer.
+        var phase = _activeQuestionsPhase;
+        if (phase == QuestionPhase.Analysis) _refiningAnalysis = true;
+        else if (phase == QuestionPhase.Plan) _replanning = true;
+        await InvokeAsync(StateHasChanged);
+
+        await SaveWorkflowStateAsync();
+
+        var agent = AgentProvider.GetDefaultAgent();
+        var contexts = await GetRepoContextsAsync(agent);
+
+        if (phase == QuestionPhase.Analysis && _analysis is not null)
+        {
+            var nonSkipped = batch.Answers.Values.Count(a => !string.IsNullOrWhiteSpace(a));
+            try
+            {
+                if (nonSkipped > 0)
+                {
+                    var refined = await agent.RefineAnalysisAsync(_ticket!, _analysis, _analysis.Conversation, contexts);
+                    refined.Conversation = _analysis.Conversation.ToList();
+                    refined.Conversation.Add(new ChatMessage(
+                        ChatMessage.RoleAgent,
+                        BuildAnalysisDeltaSummary(_analysis, refined),
+                        DateTimeOffset.UtcNow));
+                    _analysis = refined;
+                    _workflow.Analysis = _analysis;
+                    _workflow.Steps[PipelineStep.Analyze] = _analysis.HasErrors ? StepStatus.Warning : StepStatus.Passed;
+                    await SaveWorkflowStateAsync();
+                }
+            }
+            catch (NotSupportedException) { /* fall through */ }
+            catch (Exception ex) { Toasts.Error($"Refine analysis failed: {ex.Message}"); }
+            finally { _refiningAnalysis = false; }
+
+            await GeneratePlanFromAnalysisAsync(agent, contexts);
+        }
+        else if (phase == QuestionPhase.Plan && _plan is not null)
+        {
+            var feedback = FormatAnswersForAgent(batch);
+            await ReworkPlanWithFeedbackAsync(feedback);
+            if (_plan is not null && _plan.OpenQuestions.Count > 0)
+            {
+                PostQuestionsToChat(QuestionPhase.Plan, _plan.OpenQuestions);
+                await SaveWorkflowStateAsync();
+            }
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private QuestionsPayload? FindActiveBatchPayload(string batchId)
+    {
+        if (_analysis is null) return null;
+        for (var i = _analysis.Conversation.Count - 1; i >= 0; i--)
+        {
+            var att = _analysis.Conversation[i].Attachment;
+            if (att is { Kind: ChatAttachment.KindQuestions, PayloadJson: { } json })
+            {
+                try
+                {
+                    var payload = JsonSerializer.Deserialize<QuestionsPayload>(json, _jsonOpts);
+                    if (payload?.BatchId == batchId) return payload;
+                }
+                catch { }
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Replace the chat-message attachment JSON for a given batch with a fresh serialization of
+    /// the supplied payload. The chat thread re-renders against the new JSON.
+    /// </summary>
+    private void UpdateBatchAttachmentJson(string batchId, QuestionsPayload payload)
+    {
+        if (_analysis is null) return;
+        for (var i = _analysis.Conversation.Count - 1; i >= 0; i--)
+        {
+            var msg = _analysis.Conversation[i];
+            var att = msg.Attachment;
+            if (att is { Kind: ChatAttachment.KindQuestions, PayloadJson: { } json })
+            {
+                try
+                {
+                    var existing = JsonSerializer.Deserialize<QuestionsPayload>(json, _jsonOpts);
+                    if (existing?.BatchId == batchId)
                     {
-                        var (icon, color) = gap.Severity switch
-                        {
-                            GapSeverity.Error => ("alert", "text-red-400"),
-                            GapSeverity.Warning => ("alert", "text-amber-400"),
-                            _ => ("info", "text-sky-400")
-                        };
-                        <div class="flex items-start gap-2 text-sm">
-                            <Icon Name="@icon" Class="@($"w-4 h-4 {color} mt-0.5 flex-shrink-0")" />
-                            <div>
-                                <span class="text-xs uppercase tracking-wider @color font-semibold">@gap.Severity</span>
-                                <span class="text-zinc-300 ml-2">@gap.Detail</span>
-                            </div>
-                        </div>
+                        var updated = att with { PayloadJson = JsonSerializer.Serialize(payload, _jsonOpts) };
+                        _analysis.Conversation[i] = msg with { Attachment = updated };
+                        return;
                     }
+                }
+                catch { }
+            }
+        }
+    }
+
+    private static string FormatAnswersForAgent(QuestionsPayload batch)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("Answers to your open questions:");
+        sb.AppendLine();
+        for (var i = 0; i < batch.Questions.Count; i++)
+        {
+            var q = batch.Questions[i].Text;
+            var a = batch.Answers.GetValueOrDefault(i, string.Empty);
+            sb.AppendLine($"**Q: {q}**");
+            sb.AppendLine();
+            sb.AppendLine(string.IsNullOrWhiteSpace(a) ? "_(skipped — please assume a sensible default)_" : a);
+            sb.AppendLine();
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    // Analyze is now folded into Plan — RenderAnalyzeStep is no longer reachable from the
+    // stepper, but if any persisted workflow lands on it, we route to Plan via the switch.
+    private RenderFragment RenderAnalyzeStep() => RenderPlanStep();
+
+    // ── Plan Step (merged with Analyze) ─────────────────────────────────
+
+    private RenderFragment RenderPlanStep() => __builder =>
+    {
+        var isBusy = _replanning || _refiningAnalysis || _analyzing || _generatingPlan;
+        // Pending = an active inline question card in the chat thread is open and unanswered.
+        var hasPendingQuestions = _activeQuestionsBatchId is not null;
+
+        <!-- Single column, ChatGPT-style: centered, max-w-3xl, vertical sections. -->
+        <div class="max-w-3xl mx-auto">
+            @if (_plan is null && _analysis is null && !isBusy)
+            {
+                <!-- Empty state — no analysis or plan yet -->
+                <div class="flex flex-col items-center justify-center py-20 text-center">
+                    <div class="w-14 h-14 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mb-5">
+                        <Icon Name="play" Class="w-6 h-6 text-emerald-300" />
+                    </div>
+                    <div class="text-base text-zinc-100 font-semibold mb-1">Ready to plan</div>
+                    <div class="text-sm text-zinc-500 max-w-md mb-6 leading-relaxed">
+                        Analyze the ticket against your repos. If anything is unclear, the agent will ask before generating a plan.
+                    </div>
+                    <button type="button" @onclick="RunAnalysisAsync"
+                            class="inline-flex items-center gap-2 h-10 px-5 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-semibold text-sm transition-all shadow-sm hover:shadow-emerald-500/30">
+                        <Icon Name="play" Class="w-4 h-4" /> Start
+                    </button>
                 </div>
             }
             else
             {
-                <div class="text-sm text-emerald-300 mb-4 flex items-center gap-2">
-                    <Icon Name="check" Class="w-4 h-4" /> No issues found.
-                </div>
-            }
+                var pendingHint = _analyzing ? "Analyzing ticket + repos…"
+                    : _generatingPlan ? "Generating plan…"
+                    : _refiningAnalysis ? "Refining analysis…"
+                    : "Reworking plan…";
 
-            @if (_analysis.Tasks.Count > 0)
-            {
-                <h4 class="text-xs uppercase tracking-wider text-zinc-500 mb-2">Tasks identified</h4>
-                <ol class="space-y-1 mb-4">
-                    @foreach (var task in _analysis.Tasks)
-                    {
-                        <li class="flex items-start gap-2 text-sm">
-                            <span class="text-zinc-600 font-mono text-xs mt-0.5">@task.Order.</span>
-                            <span class="text-zinc-200">@task.Description</span>
-                            @if (task.FromTicket) { <span class="text-[10px] text-zinc-500 border border-zinc-700 rounded px-1">from ticket</span> }
-                        </li>
-                    }
-                </ol>
-            }
+                var placeholder = _plan is null
+                    ? "Add a clarification or just say 'retry' to draft the plan…"
+                    : "Ask, clarify, push back, or request changes…";
 
-            <button type="button" @onclick="RunAnalysisAsync" class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1">
-                <Icon Name="refresh" Class="w-3 h-3" /> Re-analyze
-            </button>
-        }
+                <!-- Conversation thread is the primary surface. The plan lives inside it as an
+                     artifact card; clicking opens the side panel with the full markdown. -->
+                <ChatThread Messages="@_unifiedChatMessages"
+                            OnSend="OnPlanChatSendAsync"
+                            IsPending="isBusy"
+                            Title="Conversation"
+                            Placeholder="@placeholder"
+                            EmptyTitle="Thinking…"
+                            EmptyHint=""
+                            PendingHint="@pendingHint"
+                            ActiveQuestionsBatchId="@_activeQuestionsBatchId"
+                            OnQuestionSubmit="OnQuestionSubmit"
+                            OnQuestionSkipped="OnQuestionSkipped"
+                            OnQuestionsDismissed="OnQuestionsDismissed"
+                            Plan="_plan"
+                            OnOpenPlan="@(() => _planPanelOpen = true)" />
+
+                @* No retry button — the chat handles everything. After a failed generation,
+                   the user can type any message to retry (and add clarifications). *@
+            }
+        </div>
+
+        <!-- Side panel: full plan rendered as markdown, with inline approve/reject. -->
+        <PlanSidePanel IsOpen="_planPanelOpen"
+                       Plan="_plan"
+                       HasPendingQuestions="hasPendingQuestions"
+                       Disabled="isBusy"
+                       OnClose="@(() => _planPanelOpen = false)"
+                       OnApprove="ApprovePlanFromPanelAsync"
+                       OnReject="RejectPlanFromPanelAsync" />
+
     };
 
-    // ── Plan Step ───────────────────────────────────────────────────────
-
-    private RenderFragment RenderPlanStep() => __builder =>
+    /// <summary>
+    /// Combined chat history: the plan's own comments PLUS the analysis conversation merged
+    /// chronologically. The merged step has one conversation surface — both refinement paths
+    /// (analyze and plan) feed into the same thread.
+    /// </summary>
+    private IReadOnlyList<ChatMessage> _unifiedChatMessages
     {
-        <h3 class="text-sm font-semibold mb-4">Implementation Plan</h3>
-        @if (_plan is null)
+        get
         {
-            <div class="text-sm text-zinc-500">Run Analysis first to generate a plan.</div>
+            var msgs = new List<ChatMessage>();
+            if (_analysis is not null)
+                msgs.AddRange(_analysis.Conversation);
+            if (_plan is not null)
+            {
+                msgs.AddRange(_plan.Comments.Select(c => new ChatMessage(
+                    c.Type switch
+                    {
+                        PlanCommentType.ChangeRequest => ChatMessage.RoleUser,
+                        PlanCommentType.Question      => ChatMessage.RoleUser,
+                        PlanCommentType.Note          => c.Author == "Agent" ? ChatMessage.RoleAgent : ChatMessage.RoleUser,
+                        _                             => ChatMessage.RoleSystem
+                    },
+                    c.Content,
+                    c.At)));
+            }
+            return msgs.OrderBy(m => m.At).ToList();
         }
-        else
-        {
-            <div class="flex items-center gap-2 mb-4">
-                <span class="@PlanStatusBadge(_plan.Status)">@_plan.Status</span>
-                <span class="text-xs text-zinc-500">by @_plan.AgentUsed agent</span>
-            </div>
+    }
 
-            <!-- Editable approach -->
-            <div class="mb-4">
-                <label class="block text-xs font-medium text-zinc-400 mb-1.5">Approach</label>
-                <textarea @bind="_plan.Approach" @bind:event="oninput" rows="3"
-                          class="w-full bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors resize-y"></textarea>
-            </div>
+    /// <summary>
+    /// User answered one of the open questions inline. Format the Q+A as a readable chat
+    /// message and reuse the existing rework path.
+    /// </summary>
+    private async Task OnAnswerOpenQuestionAsync((string Question, string Answer) qa)
+    {
+        var formatted = $"**Q: {qa.Question}**\n\n{qa.Answer}";
+        await ReworkPlanWithFeedbackAsync(formatted);
+    }
 
-            <!-- Editable tasks -->
-            <div class="mb-4">
-                <div class="flex items-center justify-between mb-2">
-                    <label class="text-xs font-medium text-zinc-400 uppercase tracking-wider">Planned tasks</label>
-                    <button type="button" @onclick="AddPlanTask"
-                            class="text-xs text-zinc-500 hover:text-zinc-300 inline-flex items-center gap-1">
-                        <Icon Name="plus" Class="w-3 h-3" /> Add task
-                    </button>
-                </div>
-                <div class="space-y-1.5">
-                    @for (var i = 0; i < _plan.Tasks.Count; i++)
-                    {
-                        var idx = i;
-                        var task = _plan.Tasks[idx];
-                        <div class="flex items-center gap-2 group">
-                            <span class="text-zinc-600 font-mono text-xs w-5 text-right flex-shrink-0">@(idx + 1).</span>
-                            <input value="@task.Description"
-                                   @onchange="@(e => UpdatePlanTask(idx, (string?)e.Value ?? ""))"
-                                   class="flex-1 bg-zinc-950 border border-zinc-800/60 rounded px-2.5 py-1.5 text-sm text-zinc-200 focus:outline-none focus:ring-1 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
-                            <button type="button" @onclick="@(() => RemovePlanTask(idx))"
-                                    class="p-1 rounded text-zinc-700 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
-                                    title="Remove task">
-                                <Icon Name="x" Class="w-3.5 h-3.5" />
-                            </button>
-                        </div>
-                    }
-                </div>
-            </div>
-
-            @if (_plan.OpenQuestions.Count > 0)
+    /// <summary>
+    /// Adapt the plan's <c>Comments</c> list into the unified <c>ChatMessage</c> shape the
+    /// thread component understands. Approval/rejection comments render as system messages so
+    /// they're visually de-emphasized; change requests + answers render as user messages.
+    /// </summary>
+    private IReadOnlyList<ChatMessage> _planChatMessages =>
+        _plan?.Comments.Select(c => new ChatMessage(
+            c.Type switch
             {
-                <h4 class="text-xs uppercase tracking-wider text-red-400 mb-2">Open questions</h4>
-                <ul class="space-y-1 mb-4">
-                    @foreach (var q in _plan.OpenQuestions)
-                    {
-                        <li class="text-sm text-red-300 flex items-start gap-2"><Icon Name="alert" Class="w-4 h-4 mt-0.5 flex-shrink-0" /> @q</li>
-                    }
-                </ul>
-            }
-
-            @if (_plan.Comments.Count > 0)
-            {
-                <h4 class="text-xs uppercase tracking-wider text-zinc-500 mb-2 mt-4">Discussion</h4>
-                <div class="space-y-2 mb-4 max-h-48 overflow-y-auto">
-                    @foreach (var c in _plan.Comments)
-                    {
-                        <div class="text-xs border-l-2 @CommentBorderColor(c.Type) pl-3">
-                            <span class="font-semibold text-zinc-300">@c.Author</span>
-                            <span class="text-zinc-600 ml-2">@c.At.ToLocalTime().ToString("g")</span>
-                            <div class="text-zinc-400 mt-0.5">@c.Content</div>
-                        </div>
-                    }
-                </div>
-            }
-
-            @if (_plan.NeedsAction)
-            {
-                <div class="flex flex-col gap-3 pt-4 border-t border-zinc-800/80">
-                    <div class="flex gap-2">
-                        <input @bind="_planComment" @bind:event="oninput" placeholder="Comment or feedback…"
-                               class="flex-1 bg-zinc-950 border border-zinc-800 rounded-md px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-emerald-500/40 focus:border-emerald-500/60 transition-colors" />
-                    </div>
-                    <div class="flex gap-2">
-                        <button type="button" @onclick="ApprovePlan"
-                                class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors">
-                            <Icon Name="check" Class="w-4 h-4" /> Approve
-                        </button>
-                        <button type="button" @onclick="RequestPlanChanges"
-                                class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-amber-900/70 hover:bg-amber-950/40 text-amber-300 text-sm font-medium transition-colors">
-                            Request changes
-                        </button>
-                        <button type="button" @onclick="RejectPlan"
-                                class="inline-flex items-center gap-2 h-9 px-4 rounded-md border border-red-900/70 hover:bg-red-950/40 text-red-300 text-sm font-medium transition-colors">
-                            Reject
-                        </button>
-                    </div>
-                </div>
-            }
-        }
-    };
+                PlanCommentType.ChangeRequest => ChatMessage.RoleUser,
+                PlanCommentType.Question      => ChatMessage.RoleUser,
+                PlanCommentType.Note          => c.Author == "Agent" ? ChatMessage.RoleAgent : ChatMessage.RoleUser,
+                _                             => ChatMessage.RoleSystem
+            },
+            c.Content,
+            c.At)).ToList()
+        ?? (IReadOnlyList<ChatMessage>)Array.Empty<ChatMessage>();
 
     private async Task ApprovePlan()
     {
@@ -454,15 +902,180 @@ else
         await SaveWorkflowStateAsync();
     }
 
-    private async Task RequestPlanChanges()
+    private async Task ApprovePlanFromPanelAsync()
     {
-        if (_plan is null || string.IsNullOrWhiteSpace(_planComment)) { Toasts.Warning("Add your feedback first."); return; }
-        _plan.Status = PlanStatus.ChangesRequested;
-        _plan.Comments.Add(new PlanComment(DateTimeOffset.UtcNow, "You", PlanCommentType.ChangeRequest, _planComment));
-        _workflow.Steps[PipelineStep.Plan] = StepStatus.Warning;
-        _planComment = string.Empty;
-        await SaveWorkflowStateAsync();
+        await ApprovePlan();
+        _planPanelOpen = false;
     }
+
+    private async Task RejectPlanFromPanelAsync()
+    {
+        await RejectPlan();
+        _planPanelOpen = false;
+    }
+
+    /// <summary>
+    /// Adds an agent chat message with a <see cref="ChatAttachment.KindPlan"/> attachment so the
+    /// plan renders inline as an artifact card. Always posts — if the plan also has open questions
+    /// they appear as a separate card below, and this card surfaces an "N open questions" badge so
+    /// the state is unambiguous. Showing the new plan even when questions remain is critical —
+    /// the user has to know the agent produced something.
+    /// </summary>
+    private void PostPlanCardToChat(bool isRework = false)
+    {
+        if (_analysis is null || _plan is null) return;
+
+        var verb = isRework ? "reworked the plan" : "drafted an implementation plan";
+        var openQ = _plan.OpenQuestions.Count;
+        var trailer = openQ > 0
+            ? $" {openQ} open question{(openQ == 1 ? "" : "s")} below — answer to refine."
+            : " Click the card to review.";
+        var narrative = $"I've {verb} — {_plan.Tasks.Count} task" +
+            (_plan.Tasks.Count == 1 ? "" : "s") + ", " + _plan.PlannedChanges.Count +
+            " file change" + (_plan.PlannedChanges.Count == 1 ? "" : "s") + "." + trailer;
+        _analysis.Conversation.Add(new ChatMessage(
+            ChatMessage.RoleAgent,
+            narrative,
+            DateTimeOffset.UtcNow,
+            new ChatAttachment(ChatAttachment.KindPlan, "Implementation plan", null, null)));
+    }
+
+    private async Task OnPlanChatSendAsync(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+
+        // If we already have a plan, the message is rework feedback (existing path adds to plan
+        // comments, which surface as user messages via _unifiedChatMessages).
+        if (_plan is not null)
+        {
+            await ReworkPlanWithFeedbackAsync(text);
+            return;
+        }
+
+        // No plan yet (analysis succeeded but plan generation failed or hasn't run). Treat the
+        // message as both clarification + retry signal: append to the analysis conversation so
+        // the agent sees it, then kick off plan generation.
+        if (_analysis is null) return;
+
+        _analysis.Conversation.Add(new ChatMessage(ChatMessage.RoleUser, text, DateTimeOffset.UtcNow));
+        // Show pending state IMMEDIATELY — the next steps (save, repo contexts, plan gen) take
+        // many seconds and the user must see "Generating plan…" the instant they hit Enter.
+        _generatingPlan = true;
+        await InvokeAsync(StateHasChanged);
+
+        try
+        {
+            await SaveWorkflowStateAsync();
+            var agent = AgentProvider.GetDefaultAgent();
+            var contexts = await GetRepoContextsAsync(agent);
+            await GeneratePlanFromAnalysisAsync(agent, contexts);
+        }
+        catch (Exception ex)
+        {
+            _analysis.Conversation.Add(new ChatMessage(
+                ChatMessage.RoleSystem,
+                $"Plan generation failed: {ex.Message}",
+                DateTimeOffset.UtcNow));
+            try { await SaveWorkflowStateAsync(); } catch { }
+        }
+        finally
+        {
+            _generatingPlan = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private async Task ReworkPlanWithFeedbackAsync(string feedback)
+    {
+        if (_plan is null || string.IsNullOrWhiteSpace(feedback)) return;
+        // No re-entrance guard: callers (TryFinalizeBatchAsync, OnPlanChatSendAsync) need to set
+        // _replanning early for instant visual feedback before invoking us. Setting it here is
+        // idempotent.
+
+        _plan.Comments.Add(new PlanComment(DateTimeOffset.UtcNow, "You", PlanCommentType.ChangeRequest, feedback));
+        _plan.Status = PlanStatus.ChangesRequested;
+        _workflow.Steps[PipelineStep.Plan] = StepStatus.Running;
+        _replanning = true;
+        // Render BEFORE the DB save so the user sees their message + pending dots instantly.
+        await InvokeAsync(StateHasChanged);
+        await SaveWorkflowStateAsync();
+
+        try
+        {
+            var agent = AgentProvider.GetDefaultAgent();
+            var contexts = new List<RepoContext>();
+            if (_workspace?.Links is not null)
+            {
+                foreach (var link in _workspace.Links)
+                {
+                    var repoPath = Path.Combine(_options.ReposRoot, link.RepositoryName);
+                    if (Directory.Exists(repoPath))
+                    {
+                        try { contexts.Add(await agent.AnalyzeRepositoryAsync(repoPath, ct: default)); }
+                        catch { }
+                    }
+                }
+            }
+
+            var reworked = await agent.ReworkPlanAsync(_ticket!, _plan, feedback, contexts);
+            // Append a brief agent reply so the chat thread shows what changed.
+            reworked.Comments.Add(new PlanComment(
+                DateTimeOffset.UtcNow,
+                "Agent",
+                PlanCommentType.Note,
+                BuildPlanDeltaSummary(_plan, reworked)));
+            _plan = reworked;
+            _workflow.Plan = _plan;
+            _workflow.Steps[PipelineStep.Plan] = StepStatus.AwaitingApproval;
+            // Re-post a fresh plan card to the chat so the user has an immediate, visible
+            // artifact for the new plan version (otherwise they're staring at a stale chat
+            // with no obvious next step).
+            PostPlanCardToChat(isRework: true);
+            await SaveWorkflowStateAsync();
+        }
+        catch (NotSupportedException)
+        {
+            _plan.Comments.Add(new PlanComment(
+                DateTimeOffset.UtcNow,
+                "Agent",
+                PlanCommentType.Note,
+                "This agent doesn't support plan rework. Switch to claude-cli in Settings."));
+            _workflow.Steps[PipelineStep.Plan] = StepStatus.Warning;
+            await SaveWorkflowStateAsync();
+        }
+        catch (Exception ex)
+        {
+            _plan.Comments.Add(new PlanComment(
+                DateTimeOffset.UtcNow,
+                "Agent",
+                PlanCommentType.Note,
+                $"Rework failed: {ex.Message}"));
+            _workflow.Steps[PipelineStep.Plan] = StepStatus.Warning;
+            await SaveWorkflowStateAsync();
+            Toasts.Error($"Rework failed: {ex.Message}");
+        }
+        finally
+        {
+            _replanning = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static string BuildPlanDeltaSummary(ImplementationPlan before, ImplementationPlan after)
+    {
+        var parts = new List<string>();
+        if (after.Tasks.Count != before.Tasks.Count)
+            parts.Add($"tasks: {before.Tasks.Count} → {after.Tasks.Count}");
+        if (after.PlannedChanges.Count != before.PlannedChanges.Count)
+            parts.Add($"planned changes: {before.PlannedChanges.Count} → {after.PlannedChanges.Count}");
+        if (after.OpenQuestions.Count != before.OpenQuestions.Count)
+            parts.Add($"open questions: {before.OpenQuestions.Count} → {after.OpenQuestions.Count}");
+        return parts.Count == 0
+            ? "Plan reworked. Review the new draft."
+            : "Plan reworked — " + string.Join(", ", parts) + ".";
+    }
+
+    private bool _replanning;
 
     private void AddPlanTask()
     {
@@ -504,7 +1117,71 @@ else
     private RenderFragment RenderImplementStep() => __builder =>
     {
         <h3 class="text-sm font-semibold mb-4">Implement</h3>
-        <div class="text-sm text-zinc-400 mb-4">Code your changes inside the container. When done, move to Validate.</div>
+        <div class="text-sm text-zinc-400 mb-4">Code your changes inside the container, or run the selected AI agent to implement the approved plan for you.</div>
+
+        var activeRun = StepRunner.GetActiveRun(TicketKey);
+        var activeImplementRun = activeRun is { Step: PipelineStep.Implement } ? activeRun : null;
+        var defaultAgent = AgentProvider.GetDefaultAgent();
+        var sessionCapable = defaultAgent.Id == LightsOff.Infrastructure.Agents.ClaudeCliAgent.AgentId
+                          || defaultAgent.Id == LightsOff.Infrastructure.Agents.CopilotCliAgent.AgentId;
+        var canRunAi = sessionCapable && (_plan?.IsApproved == true);
+
+        <div class="rounded-lg border border-zinc-800 bg-zinc-950/40 p-4 mb-4">
+            <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2 flex-wrap">
+                    <span class="text-sm font-semibold">AI implementation</span>
+                    <span class="text-[10px] text-zinc-500 uppercase tracking-wider">@defaultAgent.DisplayName</span>
+                    @if (activeImplementRun is not null)
+                    {
+                        var (badgeClass, badgeLabel) = activeImplementRun.IsRunning
+                            ? ("bg-sky-500/10 text-sky-300 border-sky-500/30", "Running")
+                            : activeImplementRun.FinalStatus switch
+                              {
+                                  StepRunStatus.Succeeded => ("bg-emerald-500/10 text-emerald-300 border-emerald-500/30", "Succeeded"),
+                                  StepRunStatus.Failed    => ("bg-red-500/10 text-red-300 border-red-500/30", "Failed"),
+                                  StepRunStatus.Cancelled => ("bg-zinc-500/10 text-zinc-300 border-zinc-500/30", "Cancelled"),
+                                  _                       => ("bg-zinc-500/10 text-zinc-300 border-zinc-500/30", activeImplementRun.FinalStatus.ToString())
+                              };
+                        <span class="@($"inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium border {badgeClass}")">@badgeLabel</span>
+                    }
+                </div>
+                <div class="flex gap-2">
+                    @if (activeImplementRun?.IsRunning == true)
+                    {
+                        <button type="button" @onclick="CancelImplementRunAsync"
+                                class="inline-flex items-center gap-1.5 h-7 px-3 rounded-md text-xs text-red-300 hover:text-red-200 border border-red-900/60 hover:bg-red-950/40 transition-colors">
+                            <Icon Name="x" Class="w-3 h-3" /> Cancel
+                        </button>
+                    }
+                    else
+                    {
+                        <button type="button" @onclick="StartImplementRunAsync" disabled="@(!canRunAi)"
+                                class="inline-flex items-center gap-1.5 h-7 px-3 rounded-md text-xs bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                            <Icon Name="play" Class="w-3 h-3" /> Run AI implementation
+                        </button>
+                    }
+                </div>
+            </div>
+            @if (!sessionCapable)
+            {
+                <div class="text-[11px] text-zinc-500">
+                    AI implementation isn't wired up yet for <code>@defaultAgent.Id</code>.
+                    Switch to <code>claude-cli</code> in <a href="/settings" class="text-emerald-400 underline underline-offset-2">Settings</a> to run it via the agent for now.
+                </div>
+            }
+            else if (_plan?.IsApproved != true)
+            {
+                <div class="text-[11px] text-amber-400/80">Approve the plan (in the Plan step) before running AI implementation.</div>
+            }
+            else if (activeImplementRun is not null)
+            {
+                <StepLogViewer TicketKey="@TicketKey" StepRunId="@activeImplementRun.StepRunId" />
+            }
+            else if (_lastImplementRunId is not null)
+            {
+                <StepLogViewer TicketKey="@TicketKey" StepRunId="@_lastImplementRunId" />
+            }
+        </div>
 
         <!-- Dependency profiles per repo -->
         @if (_workspace?.Links is not null)
@@ -875,9 +1552,86 @@ else
                     _submitResults = loaded.SubmitResults;
                     _changeSummary = loaded.Changes;
                     _activeStep = loaded.ActiveStep;
+
+                    // Self-heal stuck states from older code:
+                    // 1. Tests passed but Validate was never marked Passed (status updater wasn't
+                    //    in OnTestRunUpdated). Promote it now.
+                    if (_suiteResult is not null && _suiteResult.AllPassed
+                        && _workflow.Steps[PipelineStep.Validate] == StepStatus.Pending)
+                    {
+                        _workflow.Steps[PipelineStep.Validate] = StepStatus.Passed;
+                    }
+                    // 2. Submit ran (has results) → user definitely passed through Validate. If
+                    //    Validate is still Pending, promote it. Same for Implement.
+                    if (_submitResults is { Count: > 0 })
+                    {
+                        if (_workflow.Steps[PipelineStep.Validate] == StepStatus.Pending)
+                            _workflow.Steps[PipelineStep.Validate] = StepStatus.Passed;
+                        if (_workflow.Steps[PipelineStep.Implement] == StepStatus.Pending)
+                            _workflow.Steps[PipelineStep.Implement] = StepStatus.Passed;
+                    }
+                    // 3. Review was folded into Validate, so if Validate is Passed/Warning but
+                    //    Review is still Pending the user can't reach Submit. Mark it Skipped.
+                    if (_workflow.Steps[PipelineStep.Validate] is StepStatus.Passed or StepStatus.Warning
+                        && _workflow.Steps[PipelineStep.Review] == StepStatus.Pending)
+                    {
+                        _workflow.Steps[PipelineStep.Review] = StepStatus.Skipped;
+                    }
                 }
             }
             catch { /* corrupt JSON — start fresh */ }
+        }
+    }
+
+    /// <summary>
+    /// Called after <see cref="LoadWorkflowState"/>: restores the active question batch ID
+    /// if one exists in the conversation, or re-posts analysis questions when the analysis has
+    /// error gaps but its conversation was lost (e.g. circuit disconnect before the save).
+    /// </summary>
+    private async Task RestoreQuestionsStateAsync()
+    {
+        if (_analysis is null) return;
+
+        bool hasClosedBatch = false;
+
+        // Look for an existing unclosed batch in the conversation.
+        for (var i = _analysis.Conversation.Count - 1; i >= 0; i--)
+        {
+            var att = _analysis.Conversation[i].Attachment;
+            if (att is not { Kind: ChatAttachment.KindQuestions, PayloadJson: { } json }) continue;
+            try
+            {
+                var payload = JsonSerializer.Deserialize<QuestionsPayload>(json, _jsonOpts);
+                if (payload is { Closed: false })
+                {
+                    _activeQuestionsBatchId = payload.BatchId;
+                    _activeQuestionsPhase = QuestionPhase.Analysis;
+                    return;
+                }
+                if (payload is { Closed: true })
+                    hasClosedBatch = true;
+            }
+            catch { }
+        }
+
+        if (_plan is null)
+        {
+            if (hasClosedBatch)
+            {
+                // Questions were already answered but plan generation didn't complete.
+                // Fire in the background so the page renders immediately.
+                _ = InvokeAsync(RetryGeneratePlanAsync);
+            }
+            else
+            {
+                // No batch at all — re-post the analysis questions so the user can answer them.
+                var questions = ExtractAnalysisQuestions(_analysis);
+                if (questions.Count > 0)
+                {
+                    PostQuestionsToChat(QuestionPhase.Analysis, questions);
+                    await SaveWorkflowStateAsync();
+                }
+            }
         }
     }
 
@@ -1014,6 +1768,16 @@ else
     private RenderFragment RenderValidateStep() => __builder =>
     {
         <h3 class="text-sm font-semibold mb-4">Validate (Tests)</h3>
+
+        var validateActive = StepRunner.GetActiveRun(TicketKey) is { Step: PipelineStep.Validate } vr ? vr : null;
+        var validateRunIdToShow = validateActive?.StepRunId ?? _lastValidateRunId;
+        @if (validateRunIdToShow is not null)
+        {
+            <div class="mb-6 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
+                <div class="text-xs font-semibold mb-2 text-zinc-300">Autonomous validation log</div>
+                <StepLogViewer TicketKey="@TicketKey" StepRunId="@validateRunIdToShow" />
+            </div>
+        }
 
         @if (_workspace?.Links is not null)
         {
@@ -1290,10 +2054,21 @@ else
     private RenderFragment RenderSubmitStep() => __builder =>
     {
         <h3 class="text-sm font-semibold mb-4">Submit (Push + PRs)</h3>
+
+        var submitActive = StepRunner.GetActiveRun(TicketKey) is { Step: PipelineStep.Submit } sr ? sr : null;
+        var submitRunIdToShow = submitActive?.StepRunId ?? _lastSubmitRunId;
+        @if (submitRunIdToShow is not null)
+        {
+            <div class="mb-4 rounded-lg border border-zinc-800 bg-zinc-950/40 p-4">
+                <div class="text-xs font-semibold mb-2 text-zinc-300">Autonomous submit log</div>
+                <StepLogViewer TicketKey="@TicketKey" StepRunId="@submitRunIdToShow" />
+            </div>
+        }
+
         <button type="button" @onclick="SubmitAsync" disabled="@_submitting"
                 class="inline-flex items-center gap-2 h-9 px-4 rounded-md bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium text-sm transition-colors disabled:opacity-50 mb-4">
             @if (_submitting) { <Spinner /> <span>Pushing + opening PRs…</span> }
-            else { <Icon Name="external" Class="w-4 h-4" /> <span>Submit PRs</span> }
+            else { <Icon Name="external" Class="w-4 h-4" /> <span>Submit PRs (manual)</span> }
         </button>
 
         @if (_submitResults is not null)
@@ -1301,16 +2076,33 @@ else
             <div class="rounded-lg border border-zinc-800 bg-zinc-950/40 divide-y divide-zinc-800/60 overflow-hidden">
                 @foreach (var r in _submitResults)
                 {
-                    <div class="px-4 py-2.5 flex items-center gap-3 text-sm">
+                    <div class="px-4 py-2.5 flex items-center gap-3 text-sm flex-wrap">
                         @if (r.Url is not null)
                         {
-                            <Icon Name="check" Class="w-4 h-4 text-emerald-400" />
+                            @if (r.AlreadyExisted)
+                            {
+                                <Icon Name="info" Class="w-4 h-4 text-sky-400 flex-shrink-0" />
+                            }
+                            else
+                            {
+                                <Icon Name="check" Class="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                            }
                             <span class="font-medium">@r.RepositoryName</span>
-                            <a href="@r.Url" target="_blank" class="text-emerald-400 hover:text-emerald-300 truncate">@r.Url <Icon Name="external" Class="w-3.5 h-3.5 inline" /></a>
+                            @if (r.AlreadyExisted)
+                            {
+                                <span class="text-[10px] text-sky-300 bg-sky-500/10 border border-sky-500/30 rounded px-1.5 py-0.5">Already existed</span>
+                            }
+                            @if (!string.IsNullOrEmpty(r.Status))
+                            {
+                                <span class="@PrStatusBadge(r.Status)">@r.Status</span>
+                            }
+                            <a href="@r.Url" target="_blank" class="text-emerald-400 hover:text-emerald-300 truncate inline-flex items-center gap-1">
+                                @r.Url <Icon Name="external" Class="w-3.5 h-3.5" />
+                            </a>
                         }
                         else
                         {
-                            <Icon Name="alert" Class="w-4 h-4 text-red-400" />
+                            <Icon Name="alert" Class="w-4 h-4 text-red-400 flex-shrink-0" />
                             <span class="font-medium">@r.RepositoryName</span>
                             <span class="text-red-300 text-xs truncate">@r.Error</span>
                         }
@@ -1459,10 +2251,17 @@ else
             if (!activeRun.IsRunning)
             {
                 _workflow.Steps[PipelineStep.Validate] = _suiteResult.AllPassed ? StepStatus.Passed : StepStatus.Failed;
-                // Auto-advance to next step
+                // Review was folded into Validate — mark it Skipped so Submit unlocks. Without
+                // this Review stays Pending forever and IsStepUnlocked(Submit) returns false.
+                if (_suiteResult.AllPassed && _workflow.Steps[PipelineStep.Review] == StepStatus.Pending)
+                {
+                    _workflow.Steps[PipelineStep.Review] = StepStatus.Skipped;
+                }
+                // Auto-advance to Submit when validation passes (Review is folded in, so we skip
+                // straight to the next actionable step).
                 if (_suiteResult.AllPassed && _activeStep == PipelineStep.Validate)
                 {
-                    _activeStep = PipelineStep.Review;
+                    _activeStep = PipelineStep.Submit;
                 }
                 await SaveWorkflowStateAsync();
             }
@@ -1473,6 +2272,137 @@ else
     public void Dispose()
     {
         TestRunner.RunUpdated -= OnTestRunUpdated;
+        StepRunner.RunUpdated -= OnStepRunUpdated;
+    }
+
+    private PipelineStep? _lastActiveChainStep;
+
+    private async void OnStepRunUpdated(string ticketKey)
+    {
+        if (ticketKey != TicketKey) return;
+
+        var active = StepRunner.GetActiveRun(TicketKey);
+        if (active is not null)
+        {
+            // Track the latest run-id for each phase so per-step log viewers can replay.
+            switch (active.Step)
+            {
+                case PipelineStep.Implement: _lastImplementRunId = active.StepRunId; break;
+                case PipelineStep.Validate:  _lastValidateRunId = active.StepRunId;  break;
+                case PipelineStep.Submit:    _lastSubmitRunId = active.StepRunId;    break;
+            }
+
+            // Chain transitioned to a new step → mark the previous step Passed (the chain only
+            // advances on success). Failures stop the chain before reassigning the active slot.
+            if (_lastActiveChainStep is not null && _lastActiveChainStep != active.Step)
+            {
+                var prev = _lastActiveChainStep.Value;
+                if (_workflow.Steps.GetValueOrDefault(prev) == StepStatus.Running)
+                    _workflow.Steps[prev] = StepStatus.Passed;
+                // Validate was folded into a single UI step — when it passes during the chain,
+                // mark Review as Skipped too so Submit can unlock.
+                if (prev == PipelineStep.Validate
+                    && _workflow.Steps.GetValueOrDefault(PipelineStep.Review) == StepStatus.Pending)
+                {
+                    _workflow.Steps[PipelineStep.Review] = StepStatus.Skipped;
+                }
+            }
+            _lastActiveChainStep = active.Step;
+
+            if (active.IsRunning)
+            {
+                _workflow.Steps[active.Step] = StepStatus.Running;
+                _activeStep = active.Step;
+            }
+            else
+            {
+                // The active run finished (success or failure). Mark its step accordingly so the
+                // stepper reflects the terminal state — including the LAST step in a chain (Submit),
+                // which never gets a transition event after itself.
+                _workflow.Steps[active.Step] = active.Error is null ? StepStatus.Passed : StepStatus.Failed;
+                if (active.Step == PipelineStep.Validate && active.Error is null
+                    && _workflow.Steps.GetValueOrDefault(PipelineStep.Review) == StepStatus.Pending)
+                {
+                    _workflow.Steps[PipelineStep.Review] = StepStatus.Skipped;
+                }
+                _lastActiveChainStep = null;
+            }
+
+            await SaveWorkflowStateAsync();
+        }
+
+        await InvokeAsync(StateHasChanged);
+    }
+
+    // ── AI implementation controls ─────────────────────────────────────────
+
+    private string? _lastImplementRunId;
+    private string? _lastValidateRunId;
+    private string? _lastSubmitRunId;
+    private bool _dismissedQualityWarning;
+
+    private async Task LoadTicketAsync()
+    {
+        if (string.IsNullOrEmpty(TicketKey)) return;
+        try
+        {
+            _ticket = await Jira.GetIssueAsync(TicketKey);
+            _dismissedQualityWarning = false;
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Refresh failed: {ex.Message}");
+        }
+    }
+
+    private async Task StartAutonomousChainAsync()
+    {
+        if (_plan?.IsApproved != true)
+        {
+            Toasts.Warning("Approve the plan before starting the autonomous run.");
+            return;
+        }
+
+        var agentId = AgentProvider.GetDefaultAgent().Id;
+        var firstRunId = StepRunner.StartAutonomousChain(TicketKey, agentId);
+        if (firstRunId is null)
+        {
+            Toasts.Warning("An AI step is already running for this ticket.");
+            return;
+        }
+        _lastImplementRunId = firstRunId;
+        _workflow.Steps[PipelineStep.Implement] = StepStatus.Running;
+        _activeStep = PipelineStep.Implement;
+        await SaveWorkflowStateAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task StartImplementRunAsync()
+    {
+        if (_plan?.IsApproved != true)
+        {
+            Toasts.Warning("Approve the plan before running AI implementation.");
+            return;
+        }
+
+        var agentId = AgentProvider.GetDefaultAgent().Id;
+        var runId = StepRunner.StartStep(TicketKey, PipelineStep.Implement, agentId);
+        if (runId is null)
+        {
+            Toasts.Warning("An AI step is already running for this ticket.");
+            return;
+        }
+        _lastImplementRunId = runId;
+        _workflow.Steps[PipelineStep.Implement] = StepStatus.Running;
+        await SaveWorkflowStateAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task CancelImplementRunAsync()
+    {
+        await StepRunner.CancelAsync(TicketKey);
+        Toasts.Info("Cancel requested. The session will terminate shortly.");
     }
 
     private static string StatusBadge(string status) =>
@@ -1492,6 +2422,16 @@ else
             PlanStatus.Rejected => "bg-red-500/10 text-red-300 border-red-500/30",
             PlanStatus.ChangesRequested => "bg-amber-500/10 text-amber-300 border-amber-500/30",
             _ => "bg-zinc-800/70 text-zinc-300 border-zinc-700"
+        };
+
+    private static string PrStatusBadge(string status) =>
+        "text-[10px] uppercase font-medium rounded px-1.5 py-0.5 border " +
+        status.ToLowerInvariant() switch
+        {
+            "open"   => "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
+            "merged" => "bg-purple-500/10 text-purple-300 border-purple-500/30",
+            "closed" => "bg-zinc-700/40 text-zinc-300 border-zinc-600",
+            _        => "bg-zinc-800 text-zinc-400 border-zinc-700"
         };
 
     private static string CommentBorderColor(PlanCommentType type) => type switch

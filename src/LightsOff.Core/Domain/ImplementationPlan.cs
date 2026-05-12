@@ -11,7 +11,7 @@ public class ImplementationPlan
     public List<PlannedTask> Tasks { get; set; } = new();
     public List<FileChange> PlannedChanges { get; set; } = new();
     public List<string> Assumptions { get; set; } = new();
-    public List<string> OpenQuestions { get; set; } = new();
+    public List<OpenQuestion> OpenQuestions { get; set; } = new();
     public List<PlanComment> Comments { get; set; } = new();
 
     public bool IsApproved => Status == PlanStatus.Approved;
@@ -25,3 +25,11 @@ public enum PlanCommentType { Question, ChangeRequest, Approval, Rejection, Note
 public record PlannedTask(int Order, string Description, string? TargetFile, string? Rationale);
 public record FileChange(string Path, ChangeType Type, string? Reason);
 public record PlanComment(DateTimeOffset At, string Author, PlanCommentType Type, string Content);
+
+/// <summary>
+/// A blocking question the agent surfaces before/during planning. <see cref="Suggestions"/> are
+/// optional pre-computed likely answers — when the answer space is small (2-4 candidates) the UI
+/// shows them as numbered click-to-select rows like Claude.com's question card. An empty
+/// suggestions list falls back to free-form input.
+/// </summary>
+public record OpenQuestion(string Text, IReadOnlyList<string> Suggestions);

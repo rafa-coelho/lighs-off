@@ -1,0 +1,267 @@
+@* Question card — Claude.ai style: rendered above the composer, full width.
+   Shows one question at a time with numbered selectable options (first = recommended),
+   an "Other" row that expands to an inline input, Skip + navigation controls. *@
+
+@using LightsOff.Core.Domain
+
+@if (Payload is not null && Payload.Questions.Count > 0 && !Payload.Closed)
+{
+    var idx = ClampIndex(_localIndex, Payload.Questions.Count);
+    var q = Payload.Questions[idx];
+    var alreadyAnswered = Payload.Answers.TryGetValue(idx, out var existing);
+    var hasSuggestions = q.Suggestions is { Count: > 0 };
+
+    <div class="border-t border-zinc-700/60 bg-zinc-900">
+
+        <!-- Nav row: question text left, counter + arrows + close right -->
+        <div class="flex items-start gap-4 px-4 pt-4 pb-3">
+            <p class="flex-1 text-sm font-medium text-zinc-100 leading-snug">@q.Text</p>
+            <div class="flex items-center gap-0.5 flex-shrink-0 mt-0.5">
+                <button type="button" @onclick="() => Navigate(-1)"
+                        disabled="@(idx == 0 || Disabled)"
+                        class="p-1.5 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        aria-label="Previous question">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M10.354 11.354a.5.5 0 0 1-.708.708l-4.5-4.5a.5.5 0 0 1 0-.708l4.5-4.5a.5.5 0 0 1 .708.708L6.207 7l4.147 4.354Z"/>
+                    </svg>
+                </button>
+                <span class="text-[11px] text-zinc-500 tabular-nums w-10 text-center">@(idx + 1) / @Payload.Questions.Count</span>
+                <button type="button" @onclick="() => Navigate(1)"
+                        disabled="@(idx == Payload.Questions.Count - 1 || Disabled)"
+                        class="p-1.5 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        aria-label="Next question">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M5.646 4.646a.5.5 0 0 1 .708 0l4.5 4.5a.5.5 0 0 1 0 .708l-4.5 4.5a.5.5 0 0 1-.708-.708L9.793 9 5.646 4.854a.5.5 0 0 1 0-.708Z"/>
+                    </svg>
+                </button>
+                <button type="button" @onclick="OnClose" disabled="@Disabled"
+                        class="p-1.5 ml-1 rounded text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        aria-label="Dismiss">
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.75.75 0 1 1 1.06 1.06L9.06 8l3.22 3.22a.75.75 0 1 1-1.06 1.06L8 9.06l-3.22 3.22a.75.75 0 0 1-1.06-1.06L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        @if (alreadyAnswered)
+        {
+            <!-- Answered state -->
+            <div class="border-t border-zinc-800 px-4 py-3 flex items-center justify-between gap-3">
+                <div class="text-sm flex-1 min-w-0">
+                    @if (string.IsNullOrEmpty(existing))
+                    {
+                        <span class="italic text-zinc-500">Skipped</span>
+                    }
+                    else
+                    {
+                        <span class="text-emerald-300">✓ @existing</span>
+                    }
+                </div>
+                <button type="button" @onclick="() => ResetAnswer(idx)" disabled="@Disabled"
+                        class="text-[11px] text-zinc-500 hover:text-zinc-300 disabled:opacity-30 transition-colors">
+                    Change
+                </button>
+            </div>
+        }
+        else
+        {
+            <!-- Selectable options -->
+            @if (hasSuggestions)
+            {
+                <div class="border-t border-zinc-800 divide-y divide-zinc-800/60">
+                    @for (var i = 0; i < q.Suggestions.Count; i++)
+                    {
+                        var capturedIndex = i;
+                        var s = q.Suggestions[i];
+                        var isRecommended = i == 0;
+
+                        <button type="button"
+                                @onclick="() => Submit(idx, s)"
+                                disabled="@Disabled"
+                                class="@($"w-full flex items-center gap-3 px-4 py-2.5 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed {(isRecommended ? "hover:bg-emerald-950/40" : "hover:bg-zinc-800/50")}")">
+                            <span class="@($"inline-flex items-center justify-center w-6 h-6 rounded text-[11px] font-mono flex-shrink-0 border {(isRecommended ? "bg-emerald-500/10 border-emerald-500/40 text-emerald-400" : "bg-zinc-900 border-zinc-700 text-zinc-500")}")">
+                                @(i + 1)
+                            </span>
+                            <span class="flex-1 min-w-0 text-sm @(isRecommended ? "text-zinc-100" : "text-zinc-300")">@s</span>
+                            @if (isRecommended)
+                            {
+                                <span class="text-[10px] text-emerald-500 font-medium flex-shrink-0">Recommended</span>
+                            }
+                            <svg class="w-3.5 h-3.5 text-zinc-600 flex-shrink-0" viewBox="0 0 16 16" fill="currentColor">
+                                <path d="M5.646 3.354a.5.5 0 0 1 .708-.708l4.5 4.5a.5.5 0 0 1 0 .708l-4.5 4.5a.5.5 0 0 1-.708-.708L9.793 7.5 5.646 3.354Z"/>
+                            </svg>
+                        </button>
+                    }
+                </div>
+            }
+
+            <!-- Other / free-form row -->
+            <div class="border-t border-zinc-800 flex items-center gap-2 px-3 py-2">
+                @if (_freeFormOpen)
+                {
+                    <svg class="w-4 h-4 text-zinc-500 flex-shrink-0" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm1.414 1.06a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354l-1.086-1.086ZM11.189 6.25 9.75 4.81 3.25 11.31c-.023.023-.04.05-.05.08l-.636 2.22 2.22-.636a.25.25 0 0 0 .08-.051L11.19 6.25Z"/>
+                    </svg>
+                    <input @bind="_freeFormDraft" @bind:event="oninput" @onkeydown="OnInputKeyAsync"
+                           placeholder="Your answer…"
+                           disabled="@Disabled"
+                           class="flex-1 bg-transparent py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none"
+                           @ref="_freeFormRef" />
+                    <button type="button" @onclick="() => SubmitFreeForm(idx)"
+                            disabled="@(Disabled || string.IsNullOrWhiteSpace(_freeFormDraft))"
+                            class="text-[11px] h-7 px-3 rounded bg-emerald-500 hover:bg-emerald-400 text-emerald-950 font-medium disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0">
+                        Send
+                    </button>
+                    @if (hasSuggestions)
+                    {
+                        <button type="button" @onclick="CloseFreeForm"
+                                class="text-[11px] h-7 px-2 text-zinc-500 hover:text-zinc-300 transition-colors flex-shrink-0">
+                            Cancel
+                        </button>
+                    }
+                }
+                else
+                {
+                    <button type="button" @onclick="OpenFreeForm" disabled="@Disabled"
+                            class="flex-1 flex items-center gap-2 py-1.5 text-sm text-zinc-500 hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors text-left">
+                        <svg class="w-4 h-4 flex-shrink-0" viewBox="0 0 16 16" fill="currentColor">
+                            <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm1.414 1.06a.25.25 0 0 0-.354 0L10.811 3.75l1.439 1.44 1.263-1.263a.25.25 0 0 0 0-.354l-1.086-1.086ZM11.189 6.25 9.75 4.81 3.25 11.31c-.023.023-.04.05-.05.08l-.636 2.22 2.22-.636a.25.25 0 0 0 .08-.051L11.19 6.25Z"/>
+                        </svg>
+                        @(hasSuggestions ? "Other…" : "Type your answer…")
+                    </button>
+                    <button type="button" @onclick="() => Skip(idx)" disabled="@Disabled"
+                            class="text-[11px] h-7 px-3 rounded border border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/40 disabled:opacity-30 disabled:cursor-not-allowed transition-colors flex-shrink-0">
+                        Skip
+                    </button>
+                }
+            </div>
+        }
+    </div>
+}
+else if (Payload?.Closed == true)
+{
+    @* Closed batches are rendered inline in the thread by ChatThread itself — nothing here. *@
+}
+
+@code {
+    [Parameter, EditorRequired] public QuestionsPayload? Payload { get; set; }
+    [Parameter] public bool Disabled { get; set; }
+    [Parameter] public EventCallback<(int Index, string Answer)> OnSubmit { get; set; }
+    [Parameter] public EventCallback<int> OnSkipped { get; set; }
+    [Parameter] public EventCallback OnDismiss { get; set; }
+    [Parameter] public EventCallback<int> OnNavigate { get; set; }
+
+    private int _localIndex;
+    private bool _freeFormOpen;
+    private string _freeFormDraft = string.Empty;
+    private ElementReference _freeFormRef;
+
+    protected override void OnParametersSet()
+    {
+        if (Payload is null) return;
+        if (!Payload.Answers.ContainsKey(_localIndex)) return;
+        for (var i = 0; i < Payload.Questions.Count; i++)
+        {
+            if (!Payload.Answers.ContainsKey(i)) { _localIndex = i; break; }
+        }
+        // Auto-expand the free-form input when the current question has no suggestions.
+        SyncFreeFormState();
+    }
+
+    private void SyncFreeFormState()
+    {
+        if (Payload is null) return;
+        var idx = ClampIndex(_localIndex, Payload.Questions.Count);
+        var hasSuggestions = Payload.Questions[idx].Suggestions is { Count: > 0 };
+        if (!hasSuggestions && !_freeFormOpen)
+        {
+            _freeFormOpen = true;
+            _freeFormDraft = string.Empty;
+        }
+    }
+
+    private static int ClampIndex(int i, int count) => Math.Max(0, Math.Min(i, count - 1));
+
+    private async Task Navigate(int delta)
+    {
+        if (Payload is null) return;
+        var next = ClampIndex(_localIndex + delta, Payload.Questions.Count);
+        if (next == _localIndex) return;
+        _localIndex = next;
+        _freeFormOpen = false;
+        _freeFormDraft = string.Empty;
+        SyncFreeFormState();
+        await OnNavigate.InvokeAsync(next);
+    }
+
+    private async Task Submit(int idx, string answer)
+    {
+        if (Disabled || Payload is null) return;
+        Payload.Answers[idx] = answer.Trim();
+        await OnSubmit.InvokeAsync((idx, answer.Trim()));
+        AdvanceToNextUnanswered();
+    }
+
+    private async Task SubmitFreeForm(int idx)
+    {
+        var text = _freeFormDraft.Trim();
+        if (string.IsNullOrEmpty(text)) return;
+        _freeFormDraft = string.Empty;
+        _freeFormOpen = false;
+        await Submit(idx, text);
+    }
+
+    private async Task Skip(int idx)
+    {
+        if (Disabled || Payload is null) return;
+        Payload.Answers[idx] = string.Empty;
+        await OnSkipped.InvokeAsync(idx);
+        AdvanceToNextUnanswered();
+    }
+
+    private void ResetAnswer(int idx)
+    {
+        if (Disabled || Payload is null) return;
+        Payload.Answers.Remove(idx);
+    }
+
+    private async Task OnClose()
+    {
+        if (Disabled) return;
+        await OnDismiss.InvokeAsync();
+    }
+
+    private async Task OpenFreeForm()
+    {
+        _freeFormOpen = true;
+        _freeFormDraft = string.Empty;
+        await Task.Yield();
+        try { await _freeFormRef.FocusAsync(); } catch { }
+    }
+
+    private void CloseFreeForm()
+    {
+        _freeFormOpen = false;
+        _freeFormDraft = string.Empty;
+    }
+
+    private void AdvanceToNextUnanswered()
+    {
+        if (Payload is null) return;
+        for (var i = _localIndex + 1; i < Payload.Questions.Count; i++)
+        {
+            if (!Payload.Answers.ContainsKey(i)) { _localIndex = i; return; }
+        }
+    }
+
+    private async Task OnInputKeyAsync(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && (e.MetaKey || e.CtrlKey))
+        {
+            var idx = ClampIndex(_localIndex, Payload?.Questions.Count ?? 1);
+            await SubmitFreeForm(idx);
+        }
+        if (e.Key == "Escape") CloseFreeForm();
+    }
+}

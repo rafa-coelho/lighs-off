@@ -20,6 +20,9 @@ public class ToastService
         }
         Changed?.Invoke();
 
+        // Errors stay until manually dismissed — they fade too fast to read otherwise.
+        if (kind == ToastKind.Error && duration is null) return;
+
         var lifetime = duration ?? TimeSpan.FromSeconds(4);
         _ = Task.Run(async () =>
         {

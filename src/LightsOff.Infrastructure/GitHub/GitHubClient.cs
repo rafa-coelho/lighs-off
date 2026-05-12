@@ -245,10 +245,43 @@ public class GitHubClient : IGitHubClient
         return null;
     }
 
+    public async Task<(string Url, string State)?> FindPullRequestForBranchAsync(
+        string owner,
+        string repo,
+        string headBranch,
+        CancellationToken ct = default)
+    {
+        var pat = await _secrets.GetAsync(SecretKeys.GitHubPat, ct).ConfigureAwait(false)
+            ?? throw new InvalidOperationException("GitHub PAT is not configured.");
+
+        using var client = CreateClient(pat);
+
+        // Try open first (most common). If none, try closed (the user might have closed/merged it).
+        foreach (var state in new[] { "open", "all" })
+        {
+            var url = $"repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repo)}/pulls" +
+                      $"?head={Uri.EscapeDataString(owner)}:{Uri.EscapeDataString(headBranch)}&state={state}&per_page=1";
+            using var response = await client.GetAsync(url, ct).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) continue;
+            var prs = await response.Content.ReadFromJsonAsync<List<PullRequestDto>>(cancellationToken: ct).ConfigureAwait(false);
+            var pr = prs?.FirstOrDefault();
+            if (pr?.HtmlUrl is null) continue;
+
+            // Normalize state: GitHub returns "open"/"closed"; we surface "merged" separately when possible.
+            var displayState = pr.State ?? state;
+            if (string.Equals(displayState, "closed", StringComparison.OrdinalIgnoreCase) && pr.MergedAt is not null)
+                displayState = "merged";
+            return (pr.HtmlUrl, displayState.ToLowerInvariant());
+        }
+        return null;
+    }
+
     private sealed class PullRequestDto
     {
         [JsonPropertyName("html_url")] public string? HtmlUrl { get; set; }
         [JsonPropertyName("number")] public int Number { get; set; }
+        [JsonPropertyName("state")] public string? State { get; set; }
+        [JsonPropertyName("merged_at")] public DateTimeOffset? MergedAt { get; set; }
     }
 
     private async Task<List<RepoDto>> FetchReposAsync(HttpClient client, string firstUrl, bool isSearch, CancellationToken ct)

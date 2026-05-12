@@ -117,6 +117,56 @@ public class LibGit2Service : IGitService
         }, ct);
     }
 
+    public Task<string> GetHeadShaAsync(string repoPath, CancellationToken ct = default)
+    {
+        return Task.Run(() =>
+        {
+            using var git = new GitRepo(repoPath);
+            return git.Head.Tip?.Sha
+                ?? throw new InvalidOperationException($"HEAD has no commits at {repoPath}.");
+        }, ct);
+    }
+
+    public Task<string?> CommitAllAsync(string repoPath, string message, string authorName, string authorEmail, CancellationToken ct = default)
+    {
+        return Task.Run<string?>(() =>
+        {
+            using var git = new GitRepo(repoPath);
+            // Stage everything, including deletions and untracked files. "*" is the libgit2sharp
+            // wildcard that matches all the relevant change kinds.
+            Commands.Stage(git, "*");
+            var status = git.RetrieveStatus(new LibGit2Sharp.StatusOptions());
+            if (!status.IsDirty && !status.Staged.Any())
+            {
+                _logger.LogInformation("CommitAllAsync: nothing to commit at {RepoPath}", repoPath);
+                return null;
+            }
+
+            var sig = new Signature(authorName, authorEmail, DateTimeOffset.UtcNow);
+            var commit = git.Commit(message, sig, sig);
+            _logger.LogInformation("Committed {Sha} on {Branch} at {RepoPath}",
+                commit.Sha[..8], git.Head.FriendlyName, repoPath);
+            return commit.Sha;
+        }, ct);
+    }
+
+    public Task<IReadOnlyList<string>> GetUncommittedFilesAsync(string repoPath, CancellationToken ct = default)
+    {
+        return Task.Run<IReadOnlyList<string>>(() =>
+        {
+            using var git = new GitRepo(repoPath);
+            var status = git.RetrieveStatus(new LibGit2Sharp.StatusOptions());
+            // Anything that isn't Ignored or Unaltered is "uncommitted" for our purposes.
+            var paths = status
+                .Where(e => e.State != FileStatus.Ignored && e.State != FileStatus.Unaltered)
+                .Select(e => e.FilePath)
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(p => p, StringComparer.Ordinal)
+                .ToList();
+            return paths;
+        }, ct);
+    }
+
     public Task<int> CountNewUpstreamCommitsAsync(string repoPath, string defaultBranch, string excludeAuthor, CancellationToken ct = default)
     {
         return Task.Run(() =>

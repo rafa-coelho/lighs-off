@@ -32,6 +32,7 @@ public interface ICodeAgent
     Task<TicketAnalysis> AnalyzeTicketAsync(
         Ticket ticket,
         IReadOnlyList<RepoContext> repoContexts,
+        IProgress<string>? progress = null,
         CancellationToken ct = default);
 
     /// <summary>
@@ -61,6 +62,94 @@ public interface ICodeAgent
     Task<ImplementationPlan> GeneratePlanAsync(
         Ticket ticket,
         TicketAnalysis analysis,
+        IReadOnlyList<RepoContext> repoContexts,
+        IProgress<string>? progress = null,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Start a streaming, stateful session for the agent to execute tasks (implement), re-review
+    /// its own output, or chat with the user. The returned session stays alive until the caller
+    /// disposes it (normal exit), cancels it, or its underlying process dies.
+    ///
+    /// Local agent: throws <see cref="NotSupportedException"/> — heuristics can't stream.
+    /// AI agents (claude-cli, Anthropic API): spawn the conversation backend and bridge events.
+    /// </summary>
+    Task<IAgentSession> StartSessionAsync(
+        AgentSessionSpec spec,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Measure coverage on code that is new relative to <paramref name="baseBranch"/>. The agent
+    /// is responsible for invoking the right coverage tool (lcov/cobertura/jacoco/coverlet) given
+    /// the repo's detected runtimes and reading the produced report.
+    ///
+    /// Local agent: parses existing coverage artifacts at common paths (coverage/lcov.info,
+    /// coverage.xml, etc.) and diffs against the base branch. Returns
+    /// <see cref="CoverageReport.Error"/> set if no artifact is present — does not run tests itself.
+    /// AI agents: may drive the coverage tool end-to-end via a session.
+    /// </summary>
+    Task<CoverageReport> MeasureNewCodeCoverageAsync(
+        string repoPath,
+        string baseBranch,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Single-turn reply to a user chat message in the context of an existing plan (used for
+    /// Plan-step replan discussion). Not a full session — one question in, one reply out.
+    ///
+    /// Local agent: throws <see cref="NotSupportedException"/>.
+    /// AI agents: call the backend with plan + message and return the reply as a
+    /// <see cref="ChatReplyEvent"/>.
+    /// </summary>
+    Task<ChatReplyEvent> ReplyToPlanChatAsync(
+        ImplementationPlan plan,
+        string userMessage,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Produce a fresh implementation plan by reworking <paramref name="previousPlan"/> in light
+    /// of <paramref name="userFeedback"/>. The returned plan is a complete replacement — not a
+    /// patch — and starts in <see cref="PlanStatus.Draft"/> so the user re-approves.
+    ///
+    /// Local agent: throws <see cref="NotSupportedException"/> — heuristics can't act on free-form feedback.
+    /// AI agents: include the previous plan + the full comment chain in the prompt so the model
+    /// can address the feedback directly without the user repeating context.
+    /// </summary>
+    Task<ImplementationPlan> ReworkPlanAsync(
+        Ticket ticket,
+        ImplementationPlan previousPlan,
+        string userFeedback,
+        IReadOnlyList<RepoContext> repoContexts,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Assess whether <paramref name="diff"/> actually satisfies the ticket's acceptance
+    /// criteria. Returns a <see cref="AcReviewReport"/> with a verdict + specific concerns.
+    /// Output is consumed as a warning, not a gate — AC text is too often vague for an AI
+    /// verdict to be a reliable block.
+    ///
+    /// Local agent: throws <see cref="NotSupportedException"/> — heuristics can't read AC text.
+    /// AI agents: send the ticket + diff and parse the structured response.
+    /// </summary>
+    Task<AcReviewReport> ReviewAgainstAcAsync(
+        Ticket ticket,
+        string diff,
+        RepoContext context,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Refresh a ticket analysis after the user has answered open questions or provided
+    /// clarifications via chat. The full <paramref name="conversation"/> (chronological,
+    /// including the message that triggered this refinement) is included in the prompt so
+    /// the agent can address the latest input directly.
+    ///
+    /// Local agent: throws <see cref="NotSupportedException"/>.
+    /// AI agents: re-call analysis with the conversation as additional context.
+    /// </summary>
+    Task<TicketAnalysis> RefineAnalysisAsync(
+        Ticket ticket,
+        TicketAnalysis previousAnalysis,
+        IReadOnlyList<ChatMessage> conversation,
         IReadOnlyList<RepoContext> repoContexts,
         CancellationToken ct = default);
 }

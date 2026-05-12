@@ -52,11 +52,11 @@ public class ClaudeCodeAgent : ICodeAgent
         return ctx;
     }
 
-    public async Task<TicketAnalysis> AnalyzeTicketAsync(Ticket ticket, IReadOnlyList<RepoContext> repoContexts, CancellationToken ct = default)
+    public async Task<TicketAnalysis> AnalyzeTicketAsync(Ticket ticket, IReadOnlyList<RepoContext> repoContexts, IProgress<string>? progress = null, CancellationToken ct = default)
     {
         EnsureAvailable();
         _logger.LogInformation("ClaudeCodeAgent.AnalyzeTicketAsync: falling back to local (API integration pending)");
-        var analysis = await _fallback.AnalyzeTicketAsync(ticket, repoContexts, ct);
+        var analysis = await _fallback.AnalyzeTicketAsync(ticket, repoContexts, progress, ct);
         analysis.AgentUsed = Id;
         return analysis;
     }
@@ -79,13 +79,63 @@ public class ClaudeCodeAgent : ICodeAgent
         return profile;
     }
 
-    public async Task<ImplementationPlan> GeneratePlanAsync(Ticket ticket, TicketAnalysis analysis, IReadOnlyList<RepoContext> repoContexts, CancellationToken ct = default)
+    public async Task<ImplementationPlan> GeneratePlanAsync(Ticket ticket, TicketAnalysis analysis, IReadOnlyList<RepoContext> repoContexts, IProgress<string>? progress = null, CancellationToken ct = default)
     {
         EnsureAvailable();
         _logger.LogInformation("ClaudeCodeAgent.GeneratePlanAsync: falling back to local (API integration pending)");
-        var plan = await _fallback.GeneratePlanAsync(ticket, analysis, repoContexts, ct);
+        var plan = await _fallback.GeneratePlanAsync(ticket, analysis, repoContexts, progress, ct);
         plan.AgentUsed = Id;
         return plan;
+    }
+
+    public Task<IAgentSession> StartSessionAsync(AgentSessionSpec spec, CancellationToken ct = default)
+    {
+        EnsureAvailable();
+        throw new NotSupportedException(
+            "Streaming sessions via the Anthropic API are not yet implemented on this agent. " +
+            "Use the 'claude-cli' agent to run Implement/Validate until the API-direct backend lands.");
+    }
+
+    public async Task<CoverageReport> MeasureNewCodeCoverageAsync(string repoPath, string baseBranch, CancellationToken ct = default)
+    {
+        EnsureAvailable();
+        // Coverage artifact parsing is purely mechanical — the local implementation is already
+        // the right thing to do. Tag the result with this agent's id for provenance.
+        var report = await _fallback.MeasureNewCodeCoverageAsync(repoPath, baseBranch, ct);
+        report.AgentUsed = Id;
+        return report;
+    }
+
+    public Task<ChatReplyEvent> ReplyToPlanChatAsync(ImplementationPlan plan, string userMessage, CancellationToken ct = default)
+    {
+        EnsureAvailable();
+        throw new NotSupportedException(
+            "Plan-chat replies via the Anthropic API are not yet implemented on this agent. " +
+            "Use the 'claude-cli' agent until the API-direct backend lands.");
+    }
+
+    public Task<ImplementationPlan> ReworkPlanAsync(Ticket ticket, ImplementationPlan previousPlan, string userFeedback, IReadOnlyList<RepoContext> repoContexts, CancellationToken ct = default)
+    {
+        EnsureAvailable();
+        throw new NotSupportedException(
+            "Plan rework via the Anthropic API is not yet implemented on this agent. " +
+            "Use the 'claude-cli' agent until the API-direct backend lands.");
+    }
+
+    public Task<AcReviewReport> ReviewAgainstAcAsync(Ticket ticket, string diff, RepoContext context, CancellationToken ct = default)
+    {
+        EnsureAvailable();
+        throw new NotSupportedException(
+            "AC review via the Anthropic API is not yet implemented on this agent. " +
+            "Use the 'claude-cli' agent until the API-direct backend lands.");
+    }
+
+    public Task<TicketAnalysis> RefineAnalysisAsync(Ticket ticket, TicketAnalysis previousAnalysis, IReadOnlyList<ChatMessage> conversation, IReadOnlyList<RepoContext> repoContexts, CancellationToken ct = default)
+    {
+        EnsureAvailable();
+        throw new NotSupportedException(
+            "Analysis refinement via the Anthropic API is not yet implemented on this agent. " +
+            "Use the 'claude-cli' agent until the API-direct backend lands.");
     }
 
     private void EnsureAvailable()

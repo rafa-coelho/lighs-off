@@ -350,11 +350,29 @@ public class WorkspaceManager : IWorkspaceManager
                 await _git.PushBranchAsync(repoPath, link.BranchName, ct).ConfigureAwait(false);
 
                 var (owner, name) = ParseOwnerRepo(repo.CloneUrl);
-                var prUrl = await _github.CreatePullRequestAsync(
-                    owner, name, link.BranchName, repo.DefaultBranch, title, body, ct).ConfigureAwait(false);
-
-                _logger.LogInformation("Opened PR {Url} for {Repo} on {Branch}", prUrl, link.RepositoryName, link.BranchName);
-                results.Add(new PullRequestResult(link.RepositoryName, link.BranchName, prUrl, null));
+                try
+                {
+                    var prUrl = await _github.CreatePullRequestAsync(
+                        owner, name, link.BranchName, repo.DefaultBranch, title, body, ct).ConfigureAwait(false);
+                    _logger.LogInformation("Opened PR {Url} for {Repo} on {Branch}", prUrl, link.RepositoryName, link.BranchName);
+                    results.Add(new PullRequestResult(link.RepositoryName, link.BranchName, prUrl, null, AlreadyExisted: false, Status: "open"));
+                }
+                catch (InvalidOperationException ex) when (IsAlreadyExistsError(ex))
+                {
+                    // GitHub rejects PR creation when one already exists for this branch. That's not
+                    // a failure — look the existing PR up and report it instead.
+                    var existing = await _github.FindPullRequestForBranchAsync(owner, name, link.BranchName, ct).ConfigureAwait(false);
+                    if (existing is { } e)
+                    {
+                        _logger.LogInformation("PR already exists for {Repo}/{Branch}: {Url} ({State})", link.RepositoryName, link.BranchName, e.Url, e.State);
+                        results.Add(new PullRequestResult(link.RepositoryName, link.BranchName, e.Url, null, AlreadyExisted: true, Status: e.State));
+                    }
+                    else
+                    {
+                        // Couldn't find it — surface the original error so the user knows.
+                        results.Add(new PullRequestResult(link.RepositoryName, link.BranchName, null, ex.Message));
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -365,6 +383,10 @@ public class WorkspaceManager : IWorkspaceManager
 
         return results;
     }
+
+    private static bool IsAlreadyExistsError(Exception ex) =>
+        ex.Message.Contains("422", StringComparison.Ordinal)
+        && ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase);
 
     private static (string owner, string name) ParseOwnerRepo(string cloneUrl)
     {

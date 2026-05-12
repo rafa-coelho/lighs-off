@@ -9,7 +9,13 @@ public record CreateWorkspaceRequest(
     string? BranchNameOverride = null,
     bool StartContainer = true);
 
-public record PullRequestResult(string RepositoryName, string BranchName, string? Url, string? Error);
+public record PullRequestResult(
+    string RepositoryName,
+    string BranchName,
+    string? Url,
+    string? Error,
+    bool AlreadyExisted = false,
+    string? Status = null);  // "open" | "closed" | "merged" — null when we didn't query
 
 public interface IWorkspaceManager
 {

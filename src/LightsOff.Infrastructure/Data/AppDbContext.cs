@@ -13,6 +13,9 @@ public class AppDbContext : DbContext
     public DbSet<TicketRepositoryLink> TicketRepositoryLinks => Set<TicketRepositoryLink>();
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
     public DbSet<RepoTestConfig> RepoTestConfigs => Set<RepoTestConfig>();
+    public DbSet<StepRun> StepRuns => Set<StepRun>();
+    public DbSet<StepEventLogEntry> StepEventLog => Set<StepEventLogEntry>();
+    public DbSet<RepoAnalysisCacheEntry> RepoAnalysisCache => Set<RepoAnalysisCacheEntry>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -56,6 +59,39 @@ public class AppDbContext : DbContext
             b.Property(t => t.RepositoryName).HasMaxLength(200);
             b.Property(t => t.Name).HasMaxLength(200);
             b.HasIndex(t => t.RepositoryName);
+        });
+
+        modelBuilder.Entity<StepRun>(b =>
+        {
+            b.HasKey(s => s.Id);
+            b.Property(s => s.Id).HasMaxLength(64);
+            b.Property(s => s.TicketKey).HasMaxLength(50);
+            b.Property(s => s.AgentId).HasMaxLength(50);
+            b.Property(s => s.ParentRunId).HasMaxLength(64);
+            b.Property(s => s.Step).HasConversion<string>();
+            b.Property(s => s.Status).HasConversion<string>();
+            b.Property(s => s.StartedAt).HasConversion<DateTimeOffsetToBinaryConverter>();
+            b.Property(s => s.FinishedAt).HasConversion<DateTimeOffsetToBinaryConverter>();
+            b.HasIndex(s => new { s.TicketKey, s.Step });
+            b.HasIndex(s => s.ParentRunId);
+        });
+
+        modelBuilder.Entity<StepEventLogEntry>(b =>
+        {
+            b.HasKey(e => e.Id);
+            b.Property(e => e.StepRunId).HasMaxLength(64);
+            b.Property(e => e.Kind).HasMaxLength(80);
+            b.Property(e => e.At).HasConversion<DateTimeOffsetToBinaryConverter>();
+            b.HasIndex(e => new { e.StepRunId, e.Seq }).IsUnique();
+        });
+
+        modelBuilder.Entity<RepoAnalysisCacheEntry>(b =>
+        {
+            b.HasKey(c => new { c.RepoName, c.HeadSha });
+            b.Property(c => c.RepoName).HasMaxLength(200);
+            b.Property(c => c.HeadSha).HasMaxLength(64);
+            b.Property(c => c.AgentId).HasMaxLength(50);
+            b.Property(c => c.AnalyzedAt).HasConversion<DateTimeOffsetToBinaryConverter>();
         });
 
         base.OnModelCreating(modelBuilder);

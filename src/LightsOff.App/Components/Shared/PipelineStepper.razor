@@ -1,9 +1,9 @@
 @using LightsOff.Core.Domain
 
 <div class="flex items-center gap-1 mb-6">
-    @foreach (var step in _steps)
+    @foreach (var step in _visibleSteps)
     {
-        var status = State.Steps.GetValueOrDefault(step, StepStatus.Pending);
+        var status = StatusFor(step);
         var unlocked = State.IsStepUnlocked(step);
         var active = step == ActiveStep;
 
@@ -14,10 +14,10 @@
             <span class="flex items-center justify-center w-6 h-6 rounded-full mr-2 text-xs font-bold @StepCircleClass(status)">
                 @StatusIcon(status)
             </span>
-            <span class="text-xs font-medium">@step</span>
+            <span class="text-xs font-medium">@DisplayName(step)</span>
         </button>
 
-        @if (step != PipelineStep.Submit)
+        @if (step != _visibleSteps[^1])
         {
             <div class="w-6 h-px @(status is StepStatus.Passed or StepStatus.Warning ? "bg-emerald-500/50" : "bg-zinc-800")"></div>
         }
@@ -26,10 +26,59 @@
 
 @code {
     [Parameter, EditorRequired] public WorkflowState State { get; set; } = new();
-    [Parameter] public PipelineStep ActiveStep { get; set; } = PipelineStep.Analyze;
+    [Parameter] public PipelineStep ActiveStep { get; set; } = PipelineStep.Plan;
     [Parameter] public EventCallback<PipelineStep> OnStepClick { get; set; }
 
-    private static readonly PipelineStep[] _steps = Enum.GetValues<PipelineStep>();
+    // Analyze is folded into Plan and Review is folded into Validate — single iteration surface
+    // each. Hidden steps still tick through workflow state for backwards-compat with persisted
+    // workflows, just not surfaced here.
+    private static readonly PipelineStep[] _visibleSteps =
+    {
+        PipelineStep.Plan,
+        PipelineStep.Implement,
+        PipelineStep.Validate,
+        PipelineStep.Submit
+    };
+
+    /// <summary>
+    /// Roll up Analyze status into Plan and Review status into Validate so the merged step
+    /// reflects the worst of its two underlying states.
+    /// </summary>
+    private StepStatus StatusFor(PipelineStep step) => step switch
+    {
+        PipelineStep.Plan => Worse(
+            State.Steps.GetValueOrDefault(PipelineStep.Analyze, StepStatus.Pending),
+            State.Steps.GetValueOrDefault(PipelineStep.Plan, StepStatus.Pending)),
+        PipelineStep.Validate => Worse(
+            State.Steps.GetValueOrDefault(PipelineStep.Validate, StepStatus.Pending),
+            State.Steps.GetValueOrDefault(PipelineStep.Review, StepStatus.Pending)),
+        _ => State.Steps.GetValueOrDefault(step, StepStatus.Pending)
+    };
+
+    private static StepStatus Worse(StepStatus a, StepStatus b)
+    {
+        // Status priority: Failed beats Running beats AwaitingApproval beats Warning beats
+        // Pending beats Skipped beats Passed. Pick the worse of the two.
+        static int Rank(StepStatus s) => s switch
+        {
+            StepStatus.Failed => 6,
+            StepStatus.Running => 5,
+            StepStatus.AwaitingApproval => 4,
+            StepStatus.Warning => 3,
+            StepStatus.Pending => 2,
+            StepStatus.Skipped => 1,
+            StepStatus.Passed => 0,
+            _ => 0
+        };
+        return Rank(a) >= Rank(b) ? a : b;
+    }
+
+    private static string DisplayName(PipelineStep step) => step switch
+    {
+        PipelineStep.Plan => "Understand & Plan",
+        PipelineStep.Validate => "Validate",
+        _ => step.ToString()
+    };
 
     private static string StepClass(StepStatus status, bool active, bool unlocked)
     {

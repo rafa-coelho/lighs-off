@@ -1,0 +1,145 @@
+@* Streams agent events for a single StepRun. Renders a GitHub-Actions-style log with
+   tool-call groups collapsed by default. Pulls two sources:
+   (1) persisted StepEventLog entries on first render (replay);
+   (2) live updates from StepRunnerService.RunUpdated while the run is active. *@
+
+@using System.Text.Json
+@using LightsOff.App.Services
+@using LightsOff.Core.Domain
+@using LightsOff.Infrastructure.Data
+@using Microsoft.EntityFrameworkCore
+@inject StepRunnerService Runner
+@inject AppDbContext Db
+@implements IDisposable
+
+@if (_loading)
+{
+    <div class="flex items-center gap-2 text-xs text-zinc-500 py-4"><Spinner Class="w-3 h-3" /> Loading log…</div>
+}
+else if (_events.Count == 0)
+{
+    <div class="text-xs text-zinc-500 py-4">No events yet.</div>
+}
+else
+{
+    <div class="font-mono text-[11px] leading-snug space-y-0.5 bg-zinc-950/60 border border-zinc-800 rounded-lg p-3 max-h-[60vh] overflow-auto">
+        @foreach (var ev in _events)
+        {
+            @switch (ev)
+            {
+                case LogChunkEvent log:
+                    <pre class="whitespace-pre-wrap break-words @(log.Stream == "stderr" ? "text-amber-400" : "text-zinc-300")">@log.Text</pre>
+                    break;
+
+                case ToolCallEvent tool:
+                    <details class="border border-zinc-800/80 rounded bg-zinc-900/40">
+                        <summary class="cursor-pointer px-2 py-1 text-zinc-400 hover:text-zinc-200 inline-flex items-center gap-1.5">
+                            <Icon Name="terminal" Class="w-3 h-3 text-emerald-400/70" />
+                            <span class="text-emerald-400">@tool.Tool</span>
+                            <span class="text-zinc-600 text-[10px]">@FormatTime(tool.At)</span>
+                        </summary>
+                        <pre class="whitespace-pre-wrap break-words text-zinc-500 text-[10px] px-2 pb-2">@tool.ArgsJson</pre>
+                    </details>
+                    break;
+
+                case ChatReplyEvent reply:
+                    <div class="text-sky-300 whitespace-pre-wrap break-words px-1 py-0.5">@reply.Text</div>
+                    break;
+
+                case ClarifyingQuestionEvent q:
+                    <div class="text-amber-300 px-1 py-0.5">❓ @q.Text</div>
+                    break;
+
+                case SessionFinishedEvent fin:
+                    <div class="@(fin.Success ? "text-emerald-400" : "text-red-400") px-1 py-1 border-t border-zinc-800 mt-1">
+                        @(fin.Success ? "✓ Session finished." : $"✗ {fin.Error ?? "Session failed."}")
+                    </div>
+                    break;
+            }
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public string TicketKey { get; set; } = string.Empty;
+    [Parameter] public string? StepRunId { get; set; }
+
+    private readonly List<AgentEvent> _events = new();
+    private bool _loading = true;
+    private Action<string>? _subscription;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await LoadEventsAsync();
+
+        _subscription = async (ticketKey) =>
+        {
+            if (ticketKey != TicketKey) return;
+            // Re-read the live run's in-memory events — cheaper than hitting the DB per tick.
+            var active = Runner.GetActiveRun(TicketKey);
+            if (active is not null && (StepRunId is null || active.StepRunId == StepRunId))
+            {
+                _events.Clear();
+                _events.AddRange(active.Events);
+                await InvokeAsync(StateHasChanged);
+            }
+        };
+        Runner.RunUpdated += _subscription;
+    }
+
+    private async Task LoadEventsAsync()
+    {
+        _loading = true;
+        _events.Clear();
+        try
+        {
+            // Prefer live in-memory events if a run is active — they include anything the UI
+            // might have missed between DB writes.
+            var active = Runner.GetActiveRun(TicketKey);
+            if (active is not null && (StepRunId is null || active.StepRunId == StepRunId))
+            {
+                _events.AddRange(active.Events);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(StepRunId)) return;
+
+            var persisted = await Db.StepEventLog
+                .Where(e => e.StepRunId == StepRunId)
+                .OrderBy(e => e.Seq)
+                .ToListAsync();
+
+            foreach (var entry in persisted)
+            {
+                var ev = DeserializeEvent(entry);
+                if (ev is not null) _events.Add(ev);
+            }
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private static AgentEvent? DeserializeEvent(StepEventLogEntry entry)
+    {
+        // Events are serialized by their concrete type name. Dispatch on Kind.
+        return entry.Kind switch
+        {
+            nameof(LogChunkEvent)           => JsonSerializer.Deserialize<LogChunkEvent>(entry.PayloadJson),
+            nameof(ToolCallEvent)           => JsonSerializer.Deserialize<ToolCallEvent>(entry.PayloadJson),
+            nameof(ChatReplyEvent)          => JsonSerializer.Deserialize<ChatReplyEvent>(entry.PayloadJson),
+            nameof(ClarifyingQuestionEvent) => JsonSerializer.Deserialize<ClarifyingQuestionEvent>(entry.PayloadJson),
+            nameof(SessionFinishedEvent)    => JsonSerializer.Deserialize<SessionFinishedEvent>(entry.PayloadJson),
+            _ => null
+        };
+    }
+
+    private static string FormatTime(DateTimeOffset at) => at.ToLocalTime().ToString("HH:mm:ss");
+
+    public void Dispose()
+    {
+        if (_subscription is not null)
+            Runner.RunUpdated -= _subscription;
+    }
+}
