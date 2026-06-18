@@ -52,10 +52,14 @@ public enum ChatIntent
 /// Result of classifying a chat message. <see cref="Intent"/> is what the router believes the
 /// user wants; <see cref="Confidence"/> lets the UI decide whether to act directly or confirm
 /// first; <see cref="Rationale"/> is a short human-readable explanation surfaced in the chat;
-/// <see cref="Payload"/> carries any extracted free-text (e.g. the feedback for a rework).
+/// <see cref="Payload"/> carries any extracted free-text (e.g. the feedback for a rework);
+/// <see cref="Actionable"/> is false when the intent is understood but cannot run yet given the
+/// current <see cref="WorkflowState"/> (e.g. "implement" before the plan is approved) — the UI
+/// shows <see cref="Rationale"/> instead of dispatching.
 /// </summary>
 public sealed record IntentClassification(
     ChatIntent Intent,
     double Confidence,
     string? Rationale = null,
-    string? Payload = null);
+    string? Payload = null,
+    bool Actionable = true);

@@ -3,6 +3,7 @@ using LightsOff.Core.Configuration;
 using LightsOff.Infrastructure.Configuration;
 using LightsOff.Infrastructure.Data;
 using LightsOff.Infrastructure.Agents;
+using LightsOff.Infrastructure.Chat;
 using LightsOff.Infrastructure.Demo;
 using LightsOff.Infrastructure.Docker;
 using LightsOff.Infrastructure.Git;
@@ -58,6 +59,10 @@ public static class DependencyInjection
         services.AddScoped<IJiraConnectionProvider, JiraConnectionProvider>();
         services.AddScoped<IRepositoryRegistry, RepositoryRegistry>();
         services.AddSingleton<Workspaces.RepoConfigLoader>();
+
+        // Routes free-text chat messages onto pipeline actions for the unified ticket chat.
+        // Deterministic + harness-agnostic, so it's registered the same way in demo and real modes.
+        services.AddScoped<IIntentRouter, KeywordIntentRouter>();
 
         if (isDemo)
         {
